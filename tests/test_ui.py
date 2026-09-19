@@ -30,6 +30,7 @@ from scan_receipts.ui import (
     SmoothScroll,
     install_smooth_scroll,
 )
+from scan_receipts.version import APP_VERSION
 
 
 def receipt_frame() -> np.ndarray:
@@ -722,3 +723,25 @@ def test_capture_strip_keeps_combine_ticks_when_a_new_capture_arrives(
 
     assert page.captures.combine_selection() == [first.id]
     assert page.captures.combine_buttons[first.id].isChecked()
+
+
+def test_the_update_button_sits_on_the_scan_top_bar_with_the_version(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+
+    assert page.update_button.text() == "Check for updates"
+    assert page.version_label.text() == f"v{APP_VERSION}"
+    assert page.update_button.isEnabled()
+
+
+def test_the_update_button_is_blocked_while_a_session_runs(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, session = scanning_page(qtbot, tmp_path, monkeypatch)
+
+    page.on_started(session)
+    assert not page.update_button.isEnabled()
+
+    page.on_finished(session)
+    assert page.update_button.isEnabled()

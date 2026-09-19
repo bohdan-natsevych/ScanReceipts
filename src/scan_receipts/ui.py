@@ -84,6 +84,7 @@ from .models import (
 from .processing import ReceiptProcessor, combined_sources, preview_path
 from .recovery import RecoveryDialog, VideoViewerDialog
 from .storage import delete_session_video
+from .version import APP_VERSION
 from .workers import SourcePreviewWorker
 
 
@@ -810,6 +811,12 @@ class ScanPage(QWidget):
         self.start_button = QPushButton("Start Session")
         self.stop_button = QPushButton("Stop Session")
         self.stop_button.setEnabled(False)
+        self.version_label = QLabel(f"v{APP_VERSION}")
+        self.version_label.setStyleSheet("color:#666;")
+        self.update_button = QPushButton("Check for updates")
+        self.update_button.setToolTip(
+            "Ask GitHub whether a newer version has been published."
+        )
         self.auto_check = QCheckBox("Automatic capture")
         self.auto_check.setChecked(controller.auto_capture_enabled)
         self.auto_check.setToolTip(
@@ -866,6 +873,8 @@ class ScanPage(QWidget):
         ):
             controls.addWidget(widget)
         controls.addStretch()
+        controls.addWidget(self.version_label)
+        controls.addWidget(self.update_button)
         manual_controls = QHBoxLayout()
         manual_controls.addWidget(self.auto_check)
         manual_controls.addWidget(self.capture_button)
@@ -1110,6 +1119,7 @@ class ScanPage(QWidget):
         self.video_button.setEnabled(False)
         self.folder_button.setEnabled(False)
         self.clear_folder_button.setEnabled(False)
+        self.update_button.setEnabled(False)
 
     def on_finished(self, session: SessionRecord) -> None:
         self._set_manual_controls_enabled(False)
@@ -1121,6 +1131,7 @@ class ScanPage(QWidget):
         self.refresh_button.setEnabled(True)
         self.video_button.setEnabled(True)
         self.folder_button.setEnabled(True)
+        self.update_button.setEnabled(True)
         self._session_folder = None
         self._update_folder_value()
         QTimer.singleShot(0, self.start_source_preview)

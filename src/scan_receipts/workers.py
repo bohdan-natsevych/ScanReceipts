@@ -27,6 +27,13 @@ from .models import (
     OutputSettings,
 )
 from .processing import ReceiptProcessor, region_pixels
+from .update import (
+    ReleaseInfo,
+    UpdateError,
+    download_installer,
+    is_newer,
+    latest_release,
+)
 
 # CLAUDE CODE: how far back a manual capture may reach for a steadier frame.
 # Long enough to outlast the shake of pressing the button, short enough that the
@@ -113,6 +120,42 @@ class SourcePreviewWorker(QObject):
     @Slot()
     def stop(self) -> None:
         self._running = False
+
+
+class UpdateWorker(QObject):
+    """Checks GitHub and downloads the installer without blocking the UI."""
+
+    up_to_date = Signal(str)
+    update_found = Signal(object)
+    progress = Signal(int)
+    downloaded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, installed_version: str) -> None:
+        super().__init__()
+        self.installed_version = installed_version
+
+    @Slot()
+    def check(self) -> None:
+        try:
+            release = latest_release()
+            newer = is_newer(release.version, self.installed_version)
+        except UpdateError as error:
+            self.failed.emit(str(error))
+            return
+        if newer:
+            self.update_found.emit(release)
+        else:
+            self.up_to_date.emit(self.installed_version)
+
+    @Slot(object)
+    def download(self, release: ReleaseInfo) -> None:
+        try:
+            installer = download_installer(release, progress=self.progress.emit)
+        except UpdateError as error:
+            self.failed.emit(str(error))
+            return
+        self.downloaded.emit(installer)
 
 
 class DetectionWorker(QObject):

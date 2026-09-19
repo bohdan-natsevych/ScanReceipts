@@ -28,6 +28,8 @@ from session_replay import replay, videos_root  # noqa: E402
 
 from scan_receipts.detection import SKIN_COVER_FRACTION, skin_fraction  # noqa: E402
 
+pytestmark = pytest.mark.corpus
+
 # uuid: (minimum receipts found, duplicate budget, stray budget)
 BUDGETS = {
     "2026-08-31/b98d0106-17ef-4280-8cb4-1b47763f3830": (10, 0, 0),

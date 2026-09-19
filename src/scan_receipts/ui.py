@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -233,6 +234,39 @@ def install_smooth_scroll(area: QAbstractScrollArea, step: int = 16) -> SmoothSc
     return SmoothScroll(area)
 
 
+def trash_with_report(
+    parent: QWidget,
+    receipts: list[ReceiptRecord],
+    trash: Callable[[ReceiptRecord], object],
+    title: str,
+) -> list[int]:
+    """Trash every receipt it can, naming the ones still on disk. Ids removed.
+
+    CLAUDE CODE: one unreadable file used to abort the whole loop and escape the
+    slot, so the rest of the selection survived and the user was told nothing.
+    """
+    removed: list[int] = []
+    failures: list[str] = []
+    for receipt in receipts:
+        try:
+            trash(receipt)
+        except OSError as error:
+            # CLAUDE CODE: ReceiptProcessor.trash already names each file it could
+            # not remove, including the members of a combined sheet.
+            failures.append(str(error))
+        except Exception as error:
+            failures.append(f"{receipt.filename}: {error}")
+        else:
+            removed.append(receipt.id)
+    if failures:
+        QMessageBox.critical(
+            parent,
+            title,
+            "These receipts are still on disk:\n\n" + "\n".join(failures),
+        )
+    return removed
+
+
 class DuplicateDeckDialog(QDialog):
     changed = Signal()
 
@@ -298,12 +332,31 @@ class DuplicateDeckDialog(QDialog):
             if receipt.duplicate_group == self.group
         ]
 
+    def _members(self, title: str) -> list[ReceiptRecord] | None:
+        """The group as the database sees it now, or None once the user is told."""
+        try:
+            return self.group_receipts()
+        except Exception as error:
+            QMessageBox.critical(self, title, str(error))
+            return None
+
+    def _trash_each(self, receipts: list[ReceiptRecord], title: str) -> None:
+        trash_with_report(
+            self,
+            receipts,
+            lambda receipt: self.trash_receipt(self.repository, receipt),
+            title,
+        )
+
     def reload(self) -> None:
         while self.cards_layout.count():
             item = self.cards_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        receipts = self.group_receipts()
+        receipts = self._members("Could not list the duplicates")
+        if receipts is None:
+            self.reject()
+            return
         self.selected_receipt = None
         self.card_buttons.clear()
         self.selection.setText("Click a receipt card to select the copy to save.")
@@ -373,25 +426,35 @@ class DuplicateDeckDialog(QDialog):
             self.delete_one(self.selected_receipt)
 
     def delete_all(self) -> None:
-        receipts = self.group_receipts()
+        title = "Remove every copy"
+        receipts = self._members(title)
+        if receipts is None:
+            return
         if (
             QMessageBox.question(
                 self,
-                "Remove every copy",
+                title,
                 f"Send all {len(receipts)} copies and their preserved originals to "
                 "the Recycle Bin? This can be undone from the Recycle Bin.",
             )
             != QMessageBox.StandardButton.Yes
         ):
             return
-        for receipt in receipts:
-            self.trash_receipt(self.repository, receipt)
+        self._trash_each(receipts, title)
         self.changed.emit()
         self.accept()
 
     def mark_all_independent(self) -> None:
-        for receipt in self.group_receipts():
-            self.repository.resolve_duplicate_member(receipt.id)
+        title = "Keep all copies"
+        receipts = self._members(title)
+        if receipts is None:
+            return
+        try:
+            for receipt in receipts:
+                self.repository.resolve_duplicate_member(receipt.id)
+        except Exception as error:
+            QMessageBox.critical(self, title, str(error))
+            return
         self.changed.emit()
         self.accept()
 
@@ -400,38 +463,37 @@ class DuplicateDeckDialog(QDialog):
         ReceiptProcessor(repository).trash(receipt)
 
     def keep_only(self, chosen: ReceiptRecord) -> None:
-        others = [item for item in self.group_receipts() if item.id != chosen.id]
+        title = "Save this receipt and remove other copies?"
+        members = self._members(title)
+        if members is None:
+            return
+        others = [item for item in members if item.id != chosen.id]
         if (
             QMessageBox.question(
                 self,
-                "Save this receipt and remove other copies?",
+                title,
                 f"Save {chosen.filename} and send the other {len(others)} copy/copies "
                 "to the Recycle Bin? This can be undone from the Recycle Bin.",
             )
             != QMessageBox.StandardButton.Yes
         ):
             return
-        for receipt in others:
-            self.trash_receipt(self.repository, receipt)
+        self._trash_each(others, title)
         self.changed.emit()
         self.accept()
 
     def delete_one(self, receipt: ReceiptRecord) -> None:
+        title = "Delete duplicate copy"
         if (
             QMessageBox.question(
                 self,
-                "Delete duplicate copy",
+                title,
                 f"Send {receipt.filename} and its preserved original to the Recycle Bin?",
             )
             != QMessageBox.StandardButton.Yes
         ):
             return
-        self.trash_receipt(self.repository, receipt)
-        self.changed.emit()
-        self.reload()
-
-    def mark_independent(self, receipt: ReceiptRecord) -> None:
-        self.repository.resolve_duplicate_member(receipt.id)
+        self._trash_each([receipt], title)
         self.changed.emit()
         self.reload()
 
@@ -1301,18 +1363,19 @@ class ScanPage(QWidget):
             self.capture_dialog = None
 
     def delete_capture(self, receipt_id: int) -> None:
+        title = "Delete this capture"
         receipt = self.controller.repository.get_receipt(receipt_id)
         if (
             QMessageBox.question(
                 self,
-                "Delete this capture",
+                title,
                 f"Send {receipt.filename}{combined_suffix(self.controller.repository, receipt)} "
                 "and the preserved originals to the Recycle Bin?",
             )
             != QMessageBox.StandardButton.Yes
         ):
             return
-        self.processor.trash(receipt)
+        trash_with_report(self, [receipt], self.processor.trash, title)
         self.refresh_captures()
 
     def on_metrics(self, metrics) -> None:
@@ -1869,7 +1932,11 @@ class SessionsPage(QWidget):
         self.duplicate_decks_layout.addStretch()
 
     def open_duplicate_deck(self, group: str) -> None:
-        dialog = DuplicateDeckDialog(self.repository, group, self)
+        try:
+            dialog = DuplicateDeckDialog(self.repository, group, self)
+        except Exception as error:
+            QMessageBox.critical(self, "Could not open the duplicates", str(error))
+            return
         dialog.changed.connect(self._refresh_current)
         dialog.exec()
         self._refresh_current()
@@ -2095,10 +2162,11 @@ class SessionsPage(QWidget):
         items = self.receipts.selectedItems()
         if not items:
             return
+        title = "Delete selected receipt images"
         if (
             QMessageBox.question(
                 self,
-                "Delete selected receipt images",
+                title,
                 f"Send {len(items)} selected receipt image(s), everything they "
                 "combine and their preserved originals to the Recycle Bin?",
             )
@@ -2107,8 +2175,12 @@ class SessionsPage(QWidget):
             return
         removed = {item.data(Qt.ItemDataRole.UserRole) for item in items}
         survivor = self._neighbour_after_removal(removed)
-        for receipt_id in removed:
-            self.processor.trash(self.repository.get_receipt(receipt_id))
+        trash_with_report(
+            self,
+            [self.repository.get_receipt(receipt_id) for receipt_id in removed],
+            self.processor.trash,
+            title,
+        )
         self.current_receipt = (
             self.repository.get_receipt(survivor) if survivor is not None else None
         )

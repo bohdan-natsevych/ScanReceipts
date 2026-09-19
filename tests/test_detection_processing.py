@@ -950,3 +950,27 @@ def test_a_combined_sheet_cannot_be_combined_again(tmp_path: Path) -> None:
             session.id, [sheet, *repository.list_receipts(session.id)[1:]],
             settings.output,
         )
+
+
+def test_trash_keeps_the_row_of_a_receipt_whose_files_cannot_be_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repository, processor, session, settings = combined_session(tmp_path, 3)
+    sources = repository.list_receipts(session.id)
+    sheet = processor.combine_receipts(session.id, sources, settings.output)
+    blocked = sources[1]
+
+    def refuse_one(path: str) -> None:
+        if path == blocked.processed_path:
+            raise OSError(5, "The Recycle Bin is unavailable", path)
+        os.remove(path)
+
+    monkeypatch.setattr("scan_receipts.processing.send2trash", refuse_one)
+
+    with pytest.raises(OSError, match=blocked.filename):
+        processor.trash(sheet)
+
+    assert not repository.get_receipt(blocked.id).deleted
+    assert repository.get_receipt(sources[0].id).deleted
+    assert repository.get_receipt(sources[2].id).deleted
+    assert repository.get_receipt(sheet.id).deleted

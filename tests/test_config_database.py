@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from scan_receipts.config import SettingsStore, default_settings
 from scan_receipts.database import Repository
+from scan_receipts.diagnostics import install_crash_logging
 from scan_receipts.models import SessionStatus
 from scan_receipts.storage import delete_session_video
 
@@ -118,3 +120,39 @@ def test_review_flag_defaults_off_and_round_trips(tmp_path: Path) -> None:
 
     repository.set_review_flag(receipt.id, False)
     assert repository.get_receipt(receipt.id).review_flag is False
+
+
+def test_unhandled_exceptions_are_written_to_the_crash_log(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
+    shown: list[str] = []
+    log = install_crash_logging(tmp_path / "logs", notify=shown.append)
+
+    try:
+        raise ValueError("duplicate deck exploded")
+    except ValueError:
+        sys.excepthook(*sys.exc_info())
+
+    written = log.read_text(encoding="utf-8")
+    assert "duplicate deck exploded" in written
+    assert "test_unhandled_exceptions_are_written_to_the_crash_log" in written
+    assert shown and "duplicate deck exploded" in shown[0]
+
+
+def test_crash_log_rotates_instead_of_growing_without_a_limit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
+    log = install_crash_logging(tmp_path / "logs", maximum_bytes=4000)
+
+    for index in range(40):
+        try:
+            raise ValueError(f"failure {index}")
+        except ValueError:
+            sys.excepthook(*sys.exc_info())
+
+    previous = log.with_name(log.name + ".1")
+    assert log.stat().st_size <= 4000
+    assert previous.stat().st_size <= 4000
+    assert "failure 39" in log.read_text(encoding="utf-8")

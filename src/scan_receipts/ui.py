@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -84,7 +85,9 @@ from .models import (
 from .processing import ReceiptProcessor, combined_sources, preview_path
 from .recovery import RecoveryDialog, VideoViewerDialog
 from .storage import delete_session_video
-from .workers import SourcePreviewWorker
+from .update import ReleaseInfo, is_frozen, run_installer
+from .version import APP_VERSION
+from .workers import SourcePreviewWorker, UpdateWorker
 
 
 def reveal(path: str | Path) -> None:
@@ -782,6 +785,7 @@ class CaptureStrip(QListWidget):
 class ScanPage(QWidget):
     capabilities_ready = Signal(object)
     settings_changed = Signal()
+    request_download = Signal(object)
 
     IDLE_COUNTER = "Receipts captured: 0"
     IDLE_STATE = "READY"
@@ -797,6 +801,9 @@ class ScanPage(QWidget):
         self._session_folder: Path | None = None
         self._preview_thread: QThread | None = None
         self._preview_worker: SourcePreviewWorker | None = None
+        self._update_thread: QThread | None = None
+        self._update_worker: UpdateWorker | None = None
+        self._update_progress_dialog: QProgressDialog | None = None
         self._preview_packets: deque[FramePacket] = deque()
         self._session_id: str | None = None
 
@@ -810,6 +817,12 @@ class ScanPage(QWidget):
         self.start_button = QPushButton("Start Session")
         self.stop_button = QPushButton("Stop Session")
         self.stop_button.setEnabled(False)
+        self.version_label = QLabel(f"v{APP_VERSION}")
+        self.version_label.setStyleSheet("color:#666;")
+        self.update_button = QPushButton("Check for updates")
+        self.update_button.setToolTip(
+            "Ask GitHub whether a newer version has been published."
+        )
         self.auto_check = QCheckBox("Automatic capture")
         self.auto_check.setChecked(controller.auto_capture_enabled)
         self.auto_check.setToolTip(
@@ -866,6 +879,8 @@ class ScanPage(QWidget):
         ):
             controls.addWidget(widget)
         controls.addStretch()
+        controls.addWidget(self.version_label)
+        controls.addWidget(self.update_button)
         manual_controls = QHBoxLayout()
         manual_controls.addWidget(self.auto_check)
         manual_controls.addWidget(self.capture_button)
@@ -905,6 +920,7 @@ class ScanPage(QWidget):
         self.clear_folder_button.clicked.connect(self.clear_session_folder)
         self.start_button.clicked.connect(self.start)
         self.stop_button.clicked.connect(controller.stop)
+        self.update_button.clicked.connect(self.check_for_updates)
         self.auto_check.toggled.connect(controller.set_auto_capture)
         self.capture_button.clicked.connect(self.capture_selected_area)
         self.clear_selection_button.clicked.connect(self.preview.clear_crop)
@@ -1047,6 +1063,96 @@ class ScanPage(QWidget):
             if thread.isRunning():
                 thread.wait(3000)
 
+    def check_for_updates(self) -> None:
+        if self._update_thread is not None:
+            return
+        self.update_button.setEnabled(False)
+        worker = UpdateWorker(APP_VERSION)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.check)
+        self.request_download.connect(worker.download)
+        worker.up_to_date.connect(self._update_not_needed)
+        worker.update_found.connect(self._update_available)
+        worker.progress.connect(self._update_progress)
+        worker.downloaded.connect(self._installer_ready)
+        worker.failed.connect(self._update_failed)
+        self._update_worker = worker
+        self._update_thread = thread
+        thread.start()
+
+    def _finish_update(self) -> None:
+        worker, thread = self._update_worker, self._update_thread
+        self._update_worker = None
+        self._update_thread = None
+        if self._update_progress_dialog is not None:
+            self._update_progress_dialog.close()
+            self._update_progress_dialog = None
+        if thread is not None:
+            thread.quit()
+            if thread.isRunning():
+                thread.wait(3000)
+            thread.deleteLater()
+        if worker is not None:
+            worker.deleteLater()
+        # CLAUDE CODE: a session may have started during the check; Start being
+        # disabled is the single source of truth for "a session is running".
+        self.update_button.setEnabled(self.start_button.isEnabled())
+
+    def _update_not_needed(self, version: str) -> None:
+        self._finish_update()
+        QMessageBox.information(
+            self,
+            "Scan Receipts is up to date",
+            f"You are running the latest version ({version}).",
+        )
+
+    def _update_available(self, release: ReleaseInfo) -> None:
+        if not is_frozen():
+            self._finish_update()
+            QMessageBox.information(
+                self,
+                "Update available",
+                f"Version {release.version} has been published.\n\n"
+                "This is a source checkout, so the installer will not be run. "
+                f"See {release.page_url}",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Update available",
+            f"Version {release.version} is available (you have {APP_VERSION}).\n\n"
+            "Scan Receipts will close while it installs and then start again. "
+            "Your receipts and settings are not affected.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self._finish_update()
+            return
+        dialog = QProgressDialog("Downloading the update...", "", 0, 100, self)
+        dialog.setCancelButton(None)
+        dialog.setWindowTitle("Scan Receipts")
+        dialog.setMinimumDuration(0)
+        dialog.setValue(0)
+        self._update_progress_dialog = dialog
+        self.request_download.emit(release)
+
+    def _update_progress(self, percent: int) -> None:
+        if self._update_progress_dialog is not None:
+            self._update_progress_dialog.setValue(percent)
+
+    def _installer_ready(self, installer: Path) -> None:
+        self._finish_update()
+        try:
+            run_installer(installer)
+        except Exception as error:
+            QMessageBox.warning(self, "Could not install the update", str(error))
+            return
+        QApplication.quit()
+
+    def _update_failed(self, message: str) -> None:
+        self._finish_update()
+        QMessageBox.warning(self, "Could not check for updates", message)
+
     def start(self) -> None:
         descriptor = self.source_combo.currentData()
         if descriptor is None:
@@ -1110,6 +1216,7 @@ class ScanPage(QWidget):
         self.video_button.setEnabled(False)
         self.folder_button.setEnabled(False)
         self.clear_folder_button.setEnabled(False)
+        self.update_button.setEnabled(False)
 
     def on_finished(self, session: SessionRecord) -> None:
         self._set_manual_controls_enabled(False)
@@ -1121,6 +1228,7 @@ class ScanPage(QWidget):
         self.refresh_button.setEnabled(True)
         self.video_button.setEnabled(True)
         self.folder_button.setEnabled(True)
+        self.update_button.setEnabled(True)
         self._session_folder = None
         self._update_folder_value()
         QTimer.singleShot(0, self.start_source_preview)
@@ -2521,6 +2629,7 @@ class SettingsPage(QWidget):
             ("Separate video folder", self.video_root),
             ("Metadata database", QLabel(str(database_path))),
             ("Settings file", QLabel(str(store.path))),
+            ("Installed version", QLabel(APP_VERSION)),
             ("Recording mode", self.recording),
             ("On successful confirmation", self.retention),
             ("Successful-session history cleanup", self.history_cleanup),

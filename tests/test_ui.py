@@ -13,10 +13,11 @@ from PySide6.QtWidgets import (
     QApplication,
     QLabel,
     QMessageBox,
+    QPushButton,
     QScrollArea,
 )
 
-from scan_receipts.config import default_settings
+from scan_receipts.config import SettingsStore, default_settings
 from scan_receipts.controller import SessionController
 from scan_receipts.database import Repository
 from scan_receipts.models import CaptureCandidate
@@ -27,9 +28,11 @@ from scan_receipts.ui import (
     ScanPage,
     SelectableLabel,
     SessionsPage,
+    SettingsPage,
     SmoothScroll,
     install_smooth_scroll,
 )
+from scan_receipts.version import APP_VERSION
 
 
 def receipt_frame() -> np.ndarray:
@@ -722,3 +725,165 @@ def test_capture_strip_keeps_combine_ticks_when_a_new_capture_arrives(
 
     assert page.captures.combine_selection() == [first.id]
     assert page.captures.combine_buttons[first.id].isChecked()
+
+
+def test_the_update_button_sits_on_the_scan_top_bar_with_the_version(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+
+    assert page.update_button.text() == "Check for updates"
+    assert page.version_label.text() == f"v{APP_VERSION}"
+    assert page.update_button.isEnabled()
+
+
+def test_the_update_button_is_blocked_while_a_session_runs(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, session = scanning_page(qtbot, tmp_path, monkeypatch)
+
+    page.on_started(session)
+    assert not page.update_button.isEnabled()
+
+    page.on_finished(session)
+    assert page.update_button.isEnabled()
+
+
+def scan_release(version: str = "0.1.99"):
+    from scan_receipts.update import ReleaseInfo
+
+    return ReleaseInfo(
+        version=version,
+        tag=f"v{version}",
+        download_url=(
+            "https://github.com/owner/repo/releases/download/"
+            f"v{version}/ScanReceipts-Setup.exe"
+        ),
+        page_url=f"https://github.com/owner/repo/releases/tag/v{version}",
+    )
+
+
+def test_being_up_to_date_tells_the_user_and_downloads_nothing(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda *arguments: shown.append(arguments[2])
+    )
+    requested: list = []
+    page.request_download.connect(requested.append)
+
+    page._update_not_needed(APP_VERSION)
+
+    assert shown and APP_VERSION in shown[0]
+    assert requested == []
+    assert page.update_button.isEnabled()
+
+
+def test_a_newer_version_is_downloaded_once_the_user_confirms(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    monkeypatch.setattr("scan_receipts.ui.is_frozen", lambda: True)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_arguments: QMessageBox.StandardButton.Yes
+    )
+    requested: list = []
+    page.request_download.connect(requested.append)
+
+    page._update_available(scan_release())
+
+    assert requested == [scan_release()]
+
+
+def test_declining_the_update_downloads_nothing(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    monkeypatch.setattr("scan_receipts.ui.is_frozen", lambda: True)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_arguments: QMessageBox.StandardButton.No
+    )
+    requested: list = []
+    page.request_download.connect(requested.append)
+
+    page._update_available(scan_release())
+
+    assert requested == []
+    assert page.update_button.isEnabled()
+
+
+def test_a_source_checkout_is_never_installed_over(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    monkeypatch.setattr("scan_receipts.ui.is_frozen", lambda: False)
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda *arguments: shown.append(arguments[2])
+    )
+    requested: list = []
+    page.request_download.connect(requested.append)
+
+    page._update_available(scan_release())
+
+    assert requested == []
+    assert shown and "0.1.99" in shown[0]
+
+
+def test_the_downloaded_installer_is_launched_and_the_app_quits(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    installer = tmp_path / "ScanReceipts-Setup.exe"
+    installer.write_bytes(b"stub")
+    launched: list = []
+    quit_calls: list[bool] = []
+    monkeypatch.setattr("scan_receipts.ui.run_installer", launched.append)
+    # CLAUDE CODE: PySide6 types reject setattr, so replace the module-level name.
+    monkeypatch.setattr(
+        "scan_receipts.ui.QApplication",
+        SimpleNamespace(quit=lambda: quit_calls.append(True)),
+    )
+
+    page._installer_ready(installer)
+
+    assert launched == [installer]
+    assert quit_calls == [True]
+
+
+def test_an_update_failure_warns_and_re_enables_the_button(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *arguments: warnings.append(arguments[2])
+    )
+
+    page._update_failed("Could not reach GitHub: offline")
+
+    assert warnings == ["Could not reach GitHub: offline"]
+    assert page.update_button.isEnabled()
+
+
+def test_settings_shows_the_installed_version_without_a_second_button(
+    qtbot, tmp_path: Path
+) -> None:
+    settings = default_settings()
+    settings.receipt_root = str(tmp_path / "Receipts")
+    settings.video_root = str(tmp_path / "Videos")
+    store = SettingsStore(tmp_path / "settings.json")
+    repository = Repository(tmp_path / "history.sqlite3")
+    page = SettingsPage(settings, store, repository.path)
+    qtbot.addWidget(page)
+
+    labels = [widget.text() for widget in page.findChildren(QLabel) if widget.text()]
+    buttons = [
+        widget.text() for widget in page.findChildren(QPushButton) if widget.text()
+    ]
+
+    assert "Installed version" in labels
+    assert APP_VERSION in labels
+    assert "Check for updates" not in buttons

@@ -31,6 +31,11 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = ["-m", "not corpus"]
+markers = [
+  "corpus: replays the labelled recordings; minutes per run and needs the local corpus",
+  "gui: needs a real Qt platform (pytest-qt)",
+]
 
 [tool.ruff]
 target-version = "py311"

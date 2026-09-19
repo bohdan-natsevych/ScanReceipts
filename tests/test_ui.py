@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import cv2
 import numpy as np
+import pytest
 from PySide6.QtCore import QItemSelectionModel, QPoint, QPointF, Qt
 from PySide6.QtGui import QImage, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -33,6 +36,8 @@ from scan_receipts.ui import (
     install_smooth_scroll,
 )
 from scan_receipts.version import APP_VERSION
+
+pytestmark = pytest.mark.gui
 
 
 def receipt_frame() -> np.ndarray:
@@ -887,3 +892,97 @@ def test_settings_shows_the_installed_version_without_a_second_button(
     assert "Installed version" in labels
     assert APP_VERSION in labels
     assert "Check for updates" not in buttons
+
+
+def test_duplicate_deck_reports_copies_it_could_not_remove(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    repository, session, _settings = saved_session(tmp_path, 3)
+    records = repository.list_receipts(session.id)
+    group = records[0].duplicate_group
+    assert group
+    blocked = records[2]
+
+    def refuse_blocked(path: str) -> None:
+        if path == blocked.processed_path:
+            raise OSError(5, "The Recycle Bin is unavailable", path)
+        os.remove(path)
+
+    monkeypatch.setattr("scan_receipts.processing.send2trash", refuse_blocked)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+    )
+    reported: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "critical", lambda _parent, _title, text, *a, **k: reported.append(text)
+    )
+    dialog = DuplicateDeckDialog(repository, group)
+    qtbot.addWidget(dialog)
+    dialog.select_card(records[0])
+
+    qtbot.mouseClick(dialog.keep_selected_button, Qt.MouseButton.LeftButton)
+
+    assert reported and blocked.filename in reported[0]
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert [item.id for item in repository.list_receipts(session.id)] == [
+        records[0].id,
+        blocked.id,
+    ]
+
+
+def test_capture_strip_reports_a_capture_it_could_not_delete(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, repository, session = scanning_page(qtbot, tmp_path, monkeypatch)
+    newest = repository.list_receipts(session.id)[-1]
+    monkeypatch.setattr(
+        "scan_receipts.processing.send2trash",
+        lambda path: (_ for _ in ()).throw(OSError(5, "Recycle Bin unavailable", path)),
+    )
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+    )
+    reported: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, text, *a, **k: reported.append(text),
+    )
+
+    qtbot.mouseClick(page.captures.delete_buttons[newest.id], Qt.MouseButton.LeftButton)
+
+    assert reported and newest.filename in reported[0]
+    assert newest.id in [item.id for item in repository.list_receipts(session.id)]
+
+
+def test_review_page_reports_receipt_images_it_could_not_delete(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, repository, session, _settings = combined_review_page(qtbot, tmp_path)
+    receipts = repository.list_receipts(session.id)
+    blocked = receipts[1]
+
+    def refuse_blocked(path: str) -> None:
+        if path == blocked.processed_path:
+            raise OSError(5, "Recycle Bin unavailable", path)
+        os.remove(path)
+
+    monkeypatch.setattr("scan_receipts.processing.send2trash", refuse_blocked)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+    )
+    reported: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, text, *a, **k: reported.append(text),
+    )
+    select_rows(page, [0, 1])
+
+    page.remove_selected()
+
+    assert reported and blocked.filename in reported[0]
+    assert [item.id for item in repository.list_receipts(session.id)] == [
+        blocked.id,
+        receipts[2].id,
+    ]

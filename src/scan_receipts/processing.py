@@ -544,12 +544,26 @@ class ReceiptProcessor:
         return [item.id for item in members]
 
     def trash(self, receipt: ReceiptRecord) -> list[int]:
-        """Delete a receipt, and with a combined sheet everything it absorbed."""
-        removed = [*self.repository.list_combined_members(receipt.id), receipt]
-        for item in removed:
-            trash_receipt_files(item)
+        """Delete a receipt, and with a combined sheet everything it absorbed.
+
+        CLAUDE CODE: every member is attempted even after one fails, and a member
+        whose files survive keeps its row. Stopping at the first failure left the
+        rest of a sheet half-deleted, with rows marked gone whose files were still
+        on disk and vice versa.
+        """
+        removed: list[int] = []
+        failures: list[str] = []
+        for item in [*self.repository.list_combined_members(receipt.id), receipt]:
+            try:
+                trash_receipt_files(item)
+            except OSError as error:
+                failures.append(f"{item.filename}: {error}")
+                continue
             self.repository.mark_receipt_deleted(item.id)
-        return [item.id for item in removed]
+            removed.append(item.id)
+        if failures:
+            raise OSError("; ".join(failures))
+        return removed
 
     def save_manual(
         self,

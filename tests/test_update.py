@@ -40,8 +40,6 @@ def release_payload(tag: str = "v0.1.4", asset: str = INSTALLER_ASSET) -> bytes:
 
 def responder(payload: bytes):
     class Response(io.BytesIO):
-        headers: dict[str, str] = {}
-
         def __enter__(self):
             return self
 
@@ -103,7 +101,7 @@ def test_an_asset_hosted_outside_github_is_refused() -> None:
         f"https://example.com/{INSTALLER_ASSET}"
     )
 
-    with pytest.raises(UpdateError, match="example.com"):
+    with pytest.raises(UpdateError, match=r"example\.com"):
         latest_release(responder(json.dumps(payload).encode("utf-8")))
 
 
@@ -170,7 +168,7 @@ def test_a_download_url_outside_github_is_refused(tmp_path: Path, monkeypatch) -
     # CLAUDE CODE: gettempdir() caches, so the env var alone would be ignored.
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
-    with pytest.raises(UpdateError, match="evil.test"):
+    with pytest.raises(UpdateError, match=r"evil\.test"):
         download_installer(
             installer_release("https://evil.test/ScanReceipts-Setup.exe"),
             byte_responder(b"payload"),

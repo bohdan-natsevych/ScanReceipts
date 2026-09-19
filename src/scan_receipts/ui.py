@@ -2629,6 +2629,7 @@ class SettingsPage(QWidget):
             ("Separate video folder", self.video_root),
             ("Metadata database", QLabel(str(database_path))),
             ("Settings file", QLabel(str(store.path))),
+            ("Installed version", QLabel(APP_VERSION)),
             ("Recording mode", self.recording),
             ("On successful confirmation", self.retention),
             ("Successful-session history cleanup", self.history_cleanup),

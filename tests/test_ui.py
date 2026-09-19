@@ -13,10 +13,11 @@ from PySide6.QtWidgets import (
     QApplication,
     QLabel,
     QMessageBox,
+    QPushButton,
     QScrollArea,
 )
 
-from scan_receipts.config import default_settings
+from scan_receipts.config import SettingsStore, default_settings
 from scan_receipts.controller import SessionController
 from scan_receipts.database import Repository
 from scan_receipts.models import CaptureCandidate
@@ -27,6 +28,7 @@ from scan_receipts.ui import (
     ScanPage,
     SelectableLabel,
     SessionsPage,
+    SettingsPage,
     SmoothScroll,
     install_smooth_scroll,
 )
@@ -864,3 +866,24 @@ def test_an_update_failure_warns_and_re_enables_the_button(
 
     assert warnings == ["Could not reach GitHub: offline"]
     assert page.update_button.isEnabled()
+
+
+def test_settings_shows_the_installed_version_without_a_second_button(
+    qtbot, tmp_path: Path
+) -> None:
+    settings = default_settings()
+    settings.receipt_root = str(tmp_path / "Receipts")
+    settings.video_root = str(tmp_path / "Videos")
+    store = SettingsStore(tmp_path / "settings.json")
+    repository = Repository(tmp_path / "history.sqlite3")
+    page = SettingsPage(settings, store, repository.path)
+    qtbot.addWidget(page)
+
+    labels = [widget.text() for widget in page.findChildren(QLabel) if widget.text()]
+    buttons = [
+        widget.text() for widget in page.findChildren(QPushButton) if widget.text()
+    ]
+
+    assert "Installed version" in labels
+    assert APP_VERSION in labels
+    assert "Check for updates" not in buttons

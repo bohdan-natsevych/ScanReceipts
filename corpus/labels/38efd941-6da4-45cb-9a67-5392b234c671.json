@@ -1,0 +1,23 @@
+{
+  "session": "Session_011",
+  "recording": "2026-09-01/38efd941-6da4-45cb-9a67-5392b234c671",
+  "stride": 1,
+  "notes": "Labelled from tools/debug/segment_timeline.py plateaus, read off the full-resolution viewport crops. Pink carbon forms are named by the pre-printed number at their bottom-left corner. Windows bracket a settled presentation of one scene; a scene holding two sheets side by side is one expected capture, because the detector emits one candidate per presentation and review splits them.",
+  "expected": [
+    {"id": "r01", "window": [7.0, 9.5], "note": "carbon form 32"},
+    {"id": "r02", "window": [10.9, 12.6], "note": "carbon form 11"},
+    {"id": "r03", "window": [13.6, 15.8], "note": "carbon form 39"},
+    {"id": "r04", "window": [17.0, 19.7], "note": "carbon form 49"},
+    {"id": "r05", "window": [22.4, 26.1], "note": "carbon form 24 with the Maple Bay Marina thermal receipt lying on it"},
+    {"id": "r06", "window": [27.2, 31.5], "note": "FLIP: the thermal receipt folded up, showing the form 24 underneath"},
+    {"id": "r07", "window": [34.8, 39.5], "note": "form 24 with the thermal receipt back down, presented again"},
+    {"id": "r08", "window": [39.9, 48.6], "note": "FLIP: thermal receipt folded up again"},
+    {"id": "r09", "window": [51.8, 63.3], "note": "SMALL 1 of 3: Seair card 07 10 2026, beside the Scair purchase slip"},
+    {"id": "r10", "window": [64.5, 70.5], "note": "SMALL 2 of 3: Seair card JULY13 2026 0916, sheet behind it"},
+    {"id": "r11", "window": [72.5, 79.5], "note": "SMALL 3 of 3: Gulf Island Seaplanes card 07 21 26 0947, sheet behind it"},
+    {"id": "r12", "window": [83.0, 85.2], "note": "carbon form 26"},
+    {"id": "r13", "window": [85.8, 88.5], "note": "carbon form 25"},
+    {"id": "r14", "window": [89.8, 91.8], "note": "carbon form 18"},
+    {"id": "r15", "window": [92.3, 99.4], "note": "carbon form 38"}
+  ]
+}

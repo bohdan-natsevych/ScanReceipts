@@ -1,0 +1,88 @@
+{
+  "session": "Session_010",
+  "recording": "b98d0106-17ef-4280-8cb4-1b47763f3830",
+  "stride": 1,
+  "notes": "Migrated from tests/test_recorded_sessions.py placement windows.",
+  "expected": [
+    {
+      "id": "r01",
+      "window": [
+        5.0,
+        7.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r02",
+      "window": [
+        14.0,
+        16.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r03",
+      "window": [
+        17.0,
+        19.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r04",
+      "window": [
+        20.0,
+        23.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r05",
+      "window": [
+        24.0,
+        31.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r06",
+      "window": [
+        32.0,
+        35.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r07",
+      "window": [
+        36.0,
+        41.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r08",
+      "window": [
+        41.0,
+        49.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r09",
+      "window": [
+        50.0,
+        53.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r10",
+      "window": [
+        54.0,
+        60.0
+      ],
+      "note": ""
+    }
+  ]
+}

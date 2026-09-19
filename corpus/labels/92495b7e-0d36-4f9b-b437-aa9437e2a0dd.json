@@ -1,0 +1,120 @@
+{
+  "session": "Session_006",
+  "recording": "92495b7e-0d36-4f9b-b437-aa9437e2a0dd",
+  "stride": 1,
+  "notes": "Migrated from tests/test_recorded_sessions.py placement windows.",
+  "expected": [
+    {
+      "id": "r01",
+      "window": [
+        5.0,
+        9.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r02",
+      "window": [
+        10.0,
+        13.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r03",
+      "window": [
+        14.0,
+        17.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r04",
+      "window": [
+        17.0,
+        19.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r05",
+      "window": [
+        19.0,
+        21.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r06",
+      "window": [
+        21.0,
+        23.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r07",
+      "window": [
+        24.0,
+        30.0
+      ],
+      "note": "front of folded receipt, hand held"
+    },
+    {
+      "id": "r08",
+      "window": [
+        32.0,
+        35.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r09",
+      "window": [
+        38.0,
+        43.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r10",
+      "window": [
+        50.0,
+        55.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r11",
+      "window": [
+        56.0,
+        62.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r12",
+      "window": [
+        64.0,
+        67.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r13",
+      "window": [
+        67.0,
+        74.0
+      ],
+      "note": "small landscape receipt, hand held"
+    },
+    {
+      "id": "r14",
+      "window": [
+        74.0,
+        80.0
+      ],
+      "note": "small landscape receipt, hand held"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scan-receipts"
+version = "0.1.0"
+description = "Automatic Windows receipt capture and review application"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "opencv-python-headless>=4.10",
+  "Pillow>=10.0",
+  "PySide6>=6.7",
+  "Send2Trash>=1.8",
+  "comtypes>=1.4; sys_platform == 'win32'",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-qt>=4.4", "ruff>=0.12"]
+
+[project.scripts]
+scan-receipts = "scan_receipts.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "RUF", "SIM", "DTZ"]
+ignore = [
+  "BLE001", # GUI/worker boundaries convert unexpected failures into visible errors.
+  "RUF100", # Qt override names keep explanatory N802 noqa comments.
+  "SIM114", # Separate retention branches keep destructive actions readable.
+]

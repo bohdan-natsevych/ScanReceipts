@@ -1,0 +1,88 @@
+{
+  "session": "Session_004",
+  "recording": "d5dee043-32de-49d8-8e6c-47454110ec9a",
+  "stride": 1,
+  "notes": "Migrated from tests/test_recorded_sessions.py placement windows.",
+  "expected": [
+    {
+      "id": "r01",
+      "window": [
+        5.0,
+        7.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r02",
+      "window": [
+        8.0,
+        10.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r03",
+      "window": [
+        11.0,
+        13.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r04",
+      "window": [
+        14.0,
+        16.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r05",
+      "window": [
+        17.0,
+        20.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r06",
+      "window": [
+        20.0,
+        22.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r07",
+      "window": [
+        23.0,
+        25.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r08",
+      "window": [
+        26.0,
+        28.0
+      ],
+      "note": ""
+    },
+    {
+      "id": "r09",
+      "window": [
+        29.0,
+        34.0
+      ],
+      "note": "flip"
+    },
+    {
+      "id": "r10",
+      "window": [
+        38.0,
+        40.0
+      ],
+      "note": "flip"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+.smoke-data/
+.diagnostics/
+build/
+dist/
+*.log
+CLAUDE.md
+docs/
+.claude/
+.superpowers/
+.ruff_cache/
+scratch_*.py
+packaging/Output/

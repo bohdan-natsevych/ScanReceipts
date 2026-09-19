@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Work out the next version
+        id: version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = gh release list --repo $env:GITHUB_REPOSITORY --limit 1 --json tagName --jq '.[0].tagName'
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $version = '0.1.0'
+          } else {
+            $parts = $tag.TrimStart('v').Split('.')
+            $version = "$($parts[0]).$($parts[1]).$([int]$parts[2] + 1)"
+          }
+          Write-Host "Publishing $version (previous tag: '$tag')"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Stamp the version into the build
+        run: uv run python tools/stamp_version.py ${{ steps.version.outputs.version }}
+
+      - name: Freeze the application
+        run: uv run pyinstaller --noconfirm packaging/scan_receipts.spec
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" packaging\ScanReceipts.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" `
+            "packaging\Output\ScanReceipts-Setup.exe" `
+            --repo $env:GITHUB_REPOSITORY `
+            --title "v${{ steps.version.outputs.version }}" `
+            --generate-notes

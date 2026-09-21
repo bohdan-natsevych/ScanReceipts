@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-import faulthandler
-import logging
 import sys
-import threading
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from scan_receipts.config import SettingsStore, default_settings
 from scan_receipts.database import Repository
-from scan_receipts.diagnostics import configure_logging, fault_path
+from scan_receipts.diagnostics import install_crash_logging
 from scan_receipts.models import SessionStatus
 from scan_receipts.storage import delete_session_video
-from scan_receipts.version import APP_VERSION
 
 
 def configured(tmp_path: Path):
@@ -124,69 +119,15 @@ def test_review_flag_defaults_off_and_round_trips(tmp_path: Path) -> None:
     assert repository.get_receipt(receipt.id).review_flag is True
 
     repository.set_review_flag(receipt.id, False)
-
-def test_logging_writes_to_a_rotating_file_capped_at_ten_fifty_megabyte_files(
-    tmp_path: Path, monkeypatch
-) -> None:
-    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
-    log = configure_logging(tmp_path / "logs")
-
-    logging.getLogger("scan_receipts.test").info("hello from the session")
-
-    handler = next(
-        item
-        for item in logging.getLogger("scan_receipts").handlers
-        if isinstance(item, RotatingFileHandler)
-    )
-    assert handler.maxBytes == 50 * 1024 * 1024
-    assert handler.backupCount == 10
-    assert "hello from the session" in log.read_text(encoding="utf-8")
+    assert repository.get_receipt(receipt.id).review_flag is False
 
 
-def test_info_is_the_default_level_and_debug_can_be_turned_on(
-    tmp_path: Path, monkeypatch
-) -> None:
-    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
-    quiet = configure_logging(tmp_path / "quiet")
-    logging.getLogger("scan_receipts.test").debug("noisy detail")
-    assert "noisy detail" not in quiet.read_text(encoding="utf-8")
-
-    verbose = configure_logging(tmp_path / "verbose", level="DEBUG")
-    logging.getLogger("scan_receipts.test").debug("noisy detail")
-
-    assert "noisy detail" in verbose.read_text(encoding="utf-8")
-
-
-def test_the_log_level_can_be_raised_without_a_new_build(
-    tmp_path: Path, monkeypatch
-) -> None:
-    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
-    monkeypatch.setenv("SCANRECEIPTS_LOG_LEVEL", "DEBUG")
-
-    log = configure_logging(tmp_path / "logs")
-    logging.getLogger("scan_receipts.test").debug("env driven detail")
-
-    assert "env driven detail" in log.read_text(encoding="utf-8")
-
-
-def test_every_run_is_marked_in_the_log_with_its_version(
-    tmp_path: Path, monkeypatch
-) -> None:
-    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
-
-    log = configure_logging(tmp_path / "logs")
-
-    written = log.read_text(encoding="utf-8")
-    assert "started" in written
-    assert APP_VERSION in written
-
-
-def test_unhandled_exceptions_are_logged_and_reported(
+def test_unhandled_exceptions_are_written_to_the_crash_log(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
     shown: list[str] = []
-    log = configure_logging(tmp_path / "logs", notify=shown.append)
+    log = install_crash_logging(tmp_path / "logs", notify=shown.append)
 
     try:
         raise ValueError("duplicate deck exploded")
@@ -195,35 +136,23 @@ def test_unhandled_exceptions_are_logged_and_reported(
 
     written = log.read_text(encoding="utf-8")
     assert "duplicate deck exploded" in written
-    assert "test_unhandled_exceptions_are_logged_and_reported" in written
+    assert "test_unhandled_exceptions_are_written_to_the_crash_log" in written
     assert shown and "duplicate deck exploded" in shown[0]
 
 
-def test_worker_thread_exceptions_are_logged_too(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
-    monkeypatch.setattr(threading, "excepthook", threading.__excepthook__)
-    log = configure_logging(tmp_path / "logs")
-
-    worker = threading.Thread(target=lambda: 1 / 0, name="detection")
-    worker.start()
-    worker.join()
-
-    written = log.read_text(encoding="utf-8")
-    assert "ZeroDivisionError" in written
-    assert "detection" in written
-
-
-def test_native_crashes_are_armed_with_the_fault_handler(
+def test_crash_log_rotates_instead_of_growing_without_a_limit(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
-    was_enabled = faulthandler.is_enabled()
+    log = install_crash_logging(tmp_path / "logs", maximum_bytes=4000)
 
-    try:
-        configure_logging(tmp_path / "logs")
+    for index in range(40):
+        try:
+            raise ValueError(f"failure {index}")
+        except ValueError:
+            sys.excepthook(*sys.exc_info())
 
-        assert faulthandler.is_enabled()
-        assert fault_path(tmp_path / "logs").exists()
-    finally:
-        if not was_enabled:
-            faulthandler.disable()
+    previous = log.with_name(log.name + ".1")
+    assert log.stat().st_size <= 4000
+    assert previous.stat().st_size <= 4000
+    assert "failure 39" in log.read_text(encoding="utf-8")

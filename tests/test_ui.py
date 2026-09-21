@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -9,14 +8,7 @@ from unittest.mock import Mock
 import cv2
 import numpy as np
 import pytest
-from PySide6.QtCore import (
-    QItemSelectionModel,
-    QPoint,
-    QPointF,
-    Qt,
-    qInstallMessageHandler,
-    qWarning,
-)
+from PySide6.QtCore import QItemSelectionModel, QPoint, QPointF, Qt
 from PySide6.QtGui import QImage, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -31,10 +23,6 @@ from PySide6.QtWidgets import (
 from scan_receipts.config import SettingsStore, default_settings
 from scan_receipts.controller import SessionController
 from scan_receipts.database import Repository
-from scan_receipts.diagnostics import (
-    configure_logging,
-    install_qt_message_handler,
-)
 from scan_receipts.models import CaptureCandidate
 from scan_receipts.processing import ReceiptProcessor
 from scan_receipts.ui import (
@@ -998,16 +986,3 @@ def test_review_page_reports_receipt_images_it_could_not_delete(
         blocked.id,
         receipts[2].id,
     ]
-
-
-def test_qt_warnings_and_fatal_messages_reach_the_log(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
-    log = configure_logging(tmp_path / "logs", level="DEBUG")
-
-    install_qt_message_handler()
-    try:
-        qWarning("QThread: Destroyed while thread is still running")
-    finally:
-        qInstallMessageHandler(None)
-
-    assert "Destroyed while thread is still running" in log.read_text(encoding="utf-8")

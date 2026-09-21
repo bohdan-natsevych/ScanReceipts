@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from bisect import bisect_left
 from pathlib import Path
 
@@ -38,9 +37,6 @@ from .processing import ReceiptProcessor
 from .workers import frame_to_qimage
 
 SAME_PRESENTATION_SECONDS = 1.0
-
-
-log = logging.getLogger(__name__)
 
 
 def matches_existing_capture(
@@ -102,7 +98,6 @@ class VideoTimeline:
             for line in index.read_text(encoding="utf-8").splitlines():
                 values.append(float(json.loads(line)["timestamp"]))
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
-            log.warning("Frame index %s is unusable", index, exc_info=True)
             return []
         return values if len(values) >= self.total_frames else []
 
@@ -283,7 +278,6 @@ class VideoViewerDialog(QDialog):
             self.receipt_added.emit(receipt)
             QMessageBox.information(self, "Receipt captured", receipt.filename)
         except Exception as error:
-            log.error("Manual capture from the recording failed", exc_info=True)
             QMessageBox.critical(self, "Could not capture frame", str(error))
 
 
@@ -346,10 +340,8 @@ class OfflineRecoveryWorker(QObject):
                     self.existing_timestamps,
                 ):
                     candidates.append(final_candidate)
-            log.info("Offline recovery found %d candidate(s)", len(candidates))
             self.finished.emit(candidates)
         except Exception as error:
-            log.error("Offline recovery failed", exc_info=True)
             self.failed.emit(str(error))
 
 
@@ -447,7 +439,6 @@ class RecoveryDialog(QDialog):
                 )
                 accepted.append(item)
             except Exception as error:
-                log.error("Could not accept a recovered candidate", exc_info=True)
                 QMessageBox.critical(self, "Could not accept candidate", str(error))
         for item in accepted:
             self.cards.takeItem(self.cards.row(item))

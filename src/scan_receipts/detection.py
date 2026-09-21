@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -17,8 +16,6 @@ from .models import (
     FramePacket,
 )
 from .presentation import PresentationTracker, majority_hash
-
-log = logging.getLogger(__name__)
 
 
 def order_corners(points: np.ndarray) -> np.ndarray:
@@ -473,7 +470,6 @@ class ReceiptDetector:
         self._last_metrics = DetectionMetrics()
 
     def reset(self) -> None:
-        log.debug("Resetting the %s detector", self.profile)
         self.__init__(self.settings, self.profile)
 
     def detect_document(self, frame: np.ndarray) -> tuple[np.ndarray | None, float]:
@@ -1000,8 +996,6 @@ class ReceiptDetector:
     def flush_all(self) -> list[CaptureCandidate]:
         """Commit any valid still-window candidate still held at end-of-stream."""
         candidate = self.flush()
-        if candidate is not None:
-            log.info("End-of-stream flush released a held receipt")
         return [candidate] if candidate is not None else []
 
     def _full_resolution_sharpness(
@@ -1117,13 +1111,6 @@ class ReceiptDetector:
             else best.analysis.copy()
         )
         self._last_capture_at = best.timestamp
-        log.debug(
-            "Capture candidate at %.3f, score %.3f, boundary %.3f%s",
-            candidate.timestamp,
-            candidate.score,
-            candidate.boundary_confidence,
-            f", flagged {quality_flag}" if quality_flag else "",
-        )
         return candidate
 
     def _advance(

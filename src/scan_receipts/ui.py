@@ -869,6 +869,7 @@ class CaptureStrip(QListWidget):
 
 
 class ScanPage(QWidget):
+    SOURCE_COMBO_WIDTH = 320
     capabilities_ready = Signal(object)
     settings_changed = Signal()
     request_download = Signal(object)
@@ -895,6 +896,12 @@ class ScanPage(QWidget):
         self._session_id: str | None = None
 
         self.source_combo = QComboBox()
+        # CLAUDE CODE: camera names run long ("Elelink 4K Webcam Camera for PC
+        # Laptop"), and an elided one is useless when two cameras are attached.
+        self.source_combo.setMinimumWidth(self.SOURCE_COMBO_WIDTH)
+        self.source_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
         self.refresh_button = QPushButton("Refresh cameras")
         self.video_button = QPushButton("Video file...")
         self.folder_button = QPushButton("Choose session folder...")
@@ -1023,6 +1030,7 @@ class ScanPage(QWidget):
         self.captures.combine_selection_changed.connect(self._combine_selection_changed)
         self.combine_button.clicked.connect(self.combine_captures)
         self.source_combo.currentIndexChanged.connect(self.start_source_preview)
+        self.source_combo.currentIndexChanged.connect(self._show_source_hint)
         self._update_folder_value()
         QTimer.singleShot(0, self.refresh_sources)
 
@@ -1032,14 +1040,31 @@ class ScanPage(QWidget):
         self.source_combo.clear()
         self._sources = enumerate_cameras(self.settings)
         for descriptor in self._sources:
-            self.source_combo.addItem(
-                f"{descriptor.name} ({descriptor.backend})", descriptor
+            label = f"{descriptor.name} ({descriptor.backend})"
+            self.source_combo.addItem(label, descriptor)
+            self.source_combo.setItemData(
+                self.source_combo.count() - 1, label, Qt.ItemDataRole.ToolTipRole
             )
         self.source_combo.addItem("Video file...", None)
+        self.source_combo.setItemData(
+            self.source_combo.count() - 1,
+            "Replay a recorded session instead of a camera",
+            Qt.ItemDataRole.ToolTipRole,
+        )
         if not self._sources:
             self.source_combo.setCurrentIndex(self.source_combo.count() - 1)
         self.source_combo.blockSignals(False)
+        self._show_source_hint()
         self._schedule_preview()
+
+    def _show_source_hint(self, _index: int | None = None) -> None:
+        """Put the selected source's full name on the closed dropdown."""
+        self.source_combo.setToolTip(
+            self.source_combo.itemData(
+                self.source_combo.currentIndex(), Qt.ItemDataRole.ToolTipRole
+            )
+            or self.source_combo.currentText()
+        )
 
     def choose_video(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(

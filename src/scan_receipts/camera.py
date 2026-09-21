@@ -143,10 +143,6 @@ def require_opencv() -> None:
 
 
 class OpenCVSource(FrameSource):
-    # CLAUDE CODE: a webcam needs a moment after a mode change before the first
-    # frame arrives; this is long enough to tell a slow start from a refusal.
-    _FORMAT_PROBE_READS: ClassVar[int] = 10
-
     _PROPERTIES: ClassVar[dict[str, str]] = {
         "autofocus": "CAP_PROP_AUTOFOCUS",
         "focus": "CAP_PROP_FOCUS",
@@ -193,12 +189,6 @@ class OpenCVSource(FrameSource):
         )
         capture = self._attempt(backend, compressed=True)
         if capture is None:
-            log.warning(
-                "%s did not deliver frames as MJPG, retrying with its default format",
-                self.descriptor.name,
-            )
-            capture = self._attempt(backend, compressed=False)
-        if capture is None:
             log.error("Could not open %s", self.descriptor.name)
             raise CameraError(f"Could not open {self.descriptor.name}")
         self._capture = capture
@@ -214,13 +204,18 @@ class OpenCVSource(FrameSource):
         self._apply_controls()
 
     def _attempt(self, backend: int, compressed: bool) -> Any | None:
-        """Open the device once, or None when it will not hand over frames.
+        """Open the device once, or None when it will not open at all.
 
         CLAUDE CODE: a USB webcam defaults to uncompressed YUY2, which at 1080p30
         is around 124 MB/s - more than a USB 2.0 path can carry, so the driver
         answers by collapsing the frame rate. Teams and Zoom look fine on the
         same camera because they ask for MJPG. The format has to be set before
         the resolution, or the driver has already chosen the mode.
+
+        Nothing is read here. Probing with read() during open cost an access
+        violation inside OpenCV, and a device that takes the format and then
+        delivers nothing already degrades safely: the worker's read loop gives
+        up and reports the source unavailable.
         """
         capture = cv2.VideoCapture(self.camera_index, backend)
         if not capture.isOpened():
@@ -233,24 +228,7 @@ class OpenCVSource(FrameSource):
         capture.set(cv2.CAP_PROP_FPS, self.settings.camera_fps)
         if hasattr(cv2, "CAP_PROP_AUTOFOCUS"):
             capture.set(cv2.CAP_PROP_AUTOFOCUS, 1 if self.settings.autofocus else 0)
-        if compressed and not self._delivers(capture):
-            capture.release()
-            return None
         return capture
-
-    @staticmethod
-    def _delivers(capture: Any) -> bool:
-        """Whether the device actually produces a frame in the chosen format.
-
-        CLAUDE CODE: some devices accept the format and then hand back nothing -
-        a virtual camera especially - so accepting the property is not proof.
-        """
-        for _attempt in range(OpenCVSource._FORMAT_PROBE_READS):
-            ok, frame = capture.read()
-            if ok and frame is not None:
-                return True
-            time.sleep(0.05)
-        return False
 
     def _apply_controls(self) -> None:
         if self._capture is None:

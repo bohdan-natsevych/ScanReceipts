@@ -98,9 +98,11 @@ the detector state remain visible and thresholds can be tuned in Settings.
 A USB webcam defaults to uncompressed YUY2. At 1080p30 that is roughly 124 MB/s,
 more than a USB 2.0 path can carry, and the driver answers by collapsing the
 frame rate - which is why a camera can look smooth in Teams, which asks for
-MJPG, and slow here. The app now requests MJPG before it sets the resolution,
-checks that frames actually arrive, and falls back to the device default if they
-do not. The negotiated format is in the log:
+MJPG, and slow here. The app requests MJPG before it sets the resolution,
+because by the time the width is set the driver has already chosen its mode.
+Nothing is read from the device while it is opening; a camera that takes the
+format and then sends nothing is caught by the normal read loop, which reports
+the source unavailable. The negotiated format is in the log:
 
 ```
 Camera 1 delivers 1920.0x1080.0 @ 30.0 fps as MJPG

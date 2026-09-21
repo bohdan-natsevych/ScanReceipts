@@ -1071,3 +1071,41 @@ def test_returning_to_the_scan_tab_brings_the_preview_back(
     qtbot.wait(50)
 
     assert started, "showing the scan tab again must restart the preview"
+
+
+def test_two_preview_requests_never_open_the_camera_twice(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    opens: list[str] = []
+    monkeypatch.setattr(
+        ScanPage, "start_source_preview", lambda self, _index=None: opens.append("open")
+    )
+
+    page._schedule_preview()
+    page._schedule_preview()
+    page._schedule_preview()
+    qtbot.wait(60)
+
+    assert len(opens) == 1, f"queued starts must collapse into one, got {len(opens)}"
+
+
+def test_a_preview_that_will_not_stop_blocks_a_second_one(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    stuck = SimpleNamespace(
+        isRunning=lambda: True, quit=lambda: None, wait=lambda _ms: False
+    )
+    page._preview_worker = SimpleNamespace(stop=lambda: None)
+    page._preview_thread = stuck
+    monkeypatch.setattr(ScanPage, "_selected_source", lambda self: SimpleNamespace())
+    made: list[str] = []
+    monkeypatch.setattr(
+        "scan_receipts.ui.SourcePreviewWorker",
+        lambda source: made.append("worker") or SimpleNamespace(),
+    )
+
+    page.start_source_preview()
+
+    assert not made, "a camera still held by the old worker must not be reopened"

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gc
 import os
 import sys
 import time
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -1261,3 +1263,63 @@ def test_a_preview_retry_gives_up_instead_of_spinning(
     page.start_source_preview()
 
     assert not scheduled, "a preview that never frees the camera must stop retrying"
+def test_rebuilding_a_deck_destroys_each_card_exactly_once(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """A posted deleteLater surviving into another teardown is the purecall."""
+    repository, session, _settings = saved_session(tmp_path, 3)
+    group = repository.list_receipts(session.id)[0].duplicate_group
+    dialog = DuplicateDeckDialog(repository, group)
+    qtbot.addWidget(dialog)
+    doomed = weakref.ref(next(iter(dialog.card_buttons.values())))
+    assert doomed() is not None
+
+    dialog.reload()
+    gc.collect()
+
+    assert doomed() is None, "the old card must be gone, not queued for deletion"
+
+
+def test_rebuilding_the_decks_destroys_each_tile_exactly_once(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    repository, session, settings = saved_session(tmp_path, 3)
+    page = SessionsPage(repository, settings)
+    qtbot.addWidget(page)
+    page.refresh(session.id)
+    doomed = weakref.ref(page.duplicate_decks_layout.itemAt(0).widget())
+    assert doomed() is not None
+
+    page.refresh(session.id)
+    gc.collect()
+
+    assert doomed() is None, "the old tile must be gone, not queued for deletion"
+
+
+def test_a_deck_is_refreshed_once_after_it_closes_not_from_inside_it(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    repository, session, settings = saved_session(tmp_path, 3)
+    page = SessionsPage(repository, settings)
+    qtbot.addWidget(page)
+    page.refresh(session.id)
+    group = repository.list_receipts(session.id)[0].duplicate_group
+    inside: list[str] = []
+    monkeypatch.setattr(
+        DuplicateDeckDialog,
+        "exec",
+        lambda self: inside.append("during") if page._refresh_calls else None,
+    )
+    page._refresh_calls = []
+    real = SessionsPage._refresh_current
+    monkeypatch.setattr(
+        SessionsPage,
+        "_refresh_current",
+        lambda self: (page._refresh_calls.append("refresh"), real(self))[1],
+    )
+
+    page.open_duplicate_deck(group)
+
+    assert page._refresh_calls == [], "no refresh may run inside the modal loop"
+    qtbot.wait(50)
+    assert page._refresh_calls == ["refresh"], "exactly one refresh, after it closes"

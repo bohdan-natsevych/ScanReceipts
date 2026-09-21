@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import sqlite3
 import threading
@@ -11,6 +12,8 @@ from pathlib import Path
 
 from .config import app_data_dir
 from .models import AppSettings, ReceiptRecord, SessionRecord, SessionStatus, utc_now
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 4
 
@@ -34,6 +37,7 @@ class Repository:
             yield connection
             connection.commit()
         except Exception:
+            log.error("Rolling back the transaction on %s", self.path, exc_info=True)
             connection.rollback()
             raise
         finally:
@@ -43,9 +47,14 @@ class Repository:
         with self._lock, self._connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version and version != SCHEMA_VERSION:
-                shutil.copy2(
-                    self.path, self.path.with_suffix(f".v{version}.backup.sqlite3")
+                backup = self.path.with_suffix(f".v{version}.backup.sqlite3")
+                log.info(
+                    "Upgrading schema v%s to v%s, backing up to %s",
+                    version,
+                    SCHEMA_VERSION,
+                    backup,
                 )
+                shutil.copy2(self.path, backup)
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -122,6 +131,7 @@ class Repository:
             self._connect() as source,
             closing(sqlite3.connect(backup)) as destination,
         ):
+            log.info("Writing the daily database backup to %s", backup)
             source.backup(destination)
 
     def recover_interrupted_sessions(self) -> int:
@@ -137,6 +147,11 @@ class Repository:
                     SessionStatus.PROCESSING.value,
                 ),
             )
+            if cursor.rowcount:
+                log.warning(
+                    "Recovered %d session(s) interrupted by an earlier run",
+                    cursor.rowcount,
+                )
             return cursor.rowcount
 
     @staticmethod
@@ -148,6 +163,7 @@ class Repository:
             try:
                 used.append(int(path.name.rsplit("_", 1)[1]))
             except ValueError:
+                log.debug("Ignoring unnumbered session folder %s", path)
                 continue
         folder = day / f"Session_{max(used, default=0) + 1:03d}"
         folder.mkdir(parents=True, exist_ok=False)
@@ -468,7 +484,14 @@ class Repository:
                 "SELECT id FROM receipts WHERE duplicate_group=? AND deleted=0",
                 (group,),
             ).fetchall()
+            log.debug(
+                "Receipt %s left duplicate group %s, %d member(s) remain",
+                receipt_id,
+                group,
+                len(remaining),
+            )
             if len(remaining) <= 1:
+                log.info("Duplicate group %s dissolved", group)
                 db.execute(
                     "UPDATE receipts SET duplicate_group=NULL WHERE duplicate_group=?",
                     (group,),
@@ -476,6 +499,7 @@ class Repository:
 
     def mark_receipt_deleted(self, receipt_id: int) -> None:
         receipt = self.get_receipt(receipt_id)
+        log.info("Marking receipt %s (%s) deleted", receipt_id, receipt.filename)
         with self._lock, self._connect() as db:
             db.execute("UPDATE receipts SET deleted=1 WHERE id=?", (receipt_id,))
             db.execute(
@@ -489,6 +513,7 @@ class Repository:
             self.resolve_duplicate_member(receipt_id)
 
     def remove_session_history(self, session_id: str) -> None:
+        log.info("Removing history for session %s", session_id)
         with self._lock, self._connect() as db:
             db.execute("DELETE FROM sessions WHERE id=?", (session_id,))
 

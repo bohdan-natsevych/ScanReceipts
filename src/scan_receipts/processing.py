@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import struct
@@ -32,6 +33,8 @@ from .models import (
     OutputSettings,
     ReceiptRecord,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _expanded_corners(
@@ -251,6 +254,7 @@ def _encode_once(
     )
     ok, encoded = cv2.imencode(f".{extension}", image, parameters)
     if not ok:
+        log.error("Could not encode %s output", extension.upper())
         raise RuntimeError(f"Could not encode {extension.upper()} output")
     return encoded.tobytes(), extension
 
@@ -369,7 +373,9 @@ def trash_receipt_files(receipt: ReceiptRecord) -> None:
         preview_path(receipt.original_path),
     ):
         if Path(path).exists():
+            log.debug("Sending %s to the Recycle Bin", path)
             send2trash(str(path))
+            log.debug("Sent %s to the Recycle Bin", path)
 
 
 def combined_sources(receipt: ReceiptRecord) -> list[int]:
@@ -377,6 +383,7 @@ def combined_sources(receipt: ReceiptRecord) -> list[int]:
     try:
         stored = json.loads(receipt.edit_json or "{}")
     except ValueError:
+        log.debug("Receipt %s has unreadable edit_json", receipt.id)
         return []
     return [int(value) for value in stored.get("combined_from", [])]
 
@@ -407,6 +414,7 @@ class ReceiptProcessor:
             ".png", candidate.frame, [cv2.IMWRITE_PNG_COMPRESSION, 1]
         )
         if not ok:
+            log.error("Could not PNG-encode the original frame for %s", original_path)
             raise RuntimeError("Could not preserve original frame")
         atomic_write(original_path, original_encoded.tobytes())
         atomic_write(processed_path, encoded)
@@ -464,9 +472,21 @@ class ReceiptProcessor:
             quality_flag=candidate.quality_flag,
         )
         if duplicate_group:
+            log.info(
+                "Receipt %s joins duplicate group %s alongside %s",
+                record.id,
+                duplicate_group,
+                duplicate_ids,
+            )
             self.repository.set_duplicate_group(
                 [*duplicate_ids, record.id], duplicate_group
             )
+        log.info(
+            "Saved %s (id %s)%s",
+            record.filename,
+            record.id,
+            f" flagged {record.quality_flag}" if record.quality_flag else "",
+        )
         return record
 
     def combine_receipts(
@@ -553,16 +573,26 @@ class ReceiptProcessor:
         """
         removed: list[int] = []
         failures: list[str] = []
-        for item in [*self.repository.list_combined_members(receipt.id), receipt]:
+        members = [*self.repository.list_combined_members(receipt.id), receipt]
+        log.info(
+            "Trashing receipt %s (%s) and %d absorbed member(s)",
+            receipt.id,
+            receipt.filename,
+            len(members) - 1,
+        )
+        for item in members:
             try:
                 trash_receipt_files(item)
             except OSError as error:
+                log.warning("Could not trash %s: %s", item.filename, error)
                 failures.append(f"{item.filename}: {error}")
                 continue
             self.repository.mark_receipt_deleted(item.id)
+            log.debug("Marked receipt %s deleted", item.id)
             removed.append(item.id)
         if failures:
             raise OSError("; ".join(failures))
+        log.info("Trashed receipt ids %s", removed)
         return removed
 
     def save_manual(
@@ -773,6 +803,12 @@ class ReceiptProcessor:
         for receipt in receipts:
             groups.setdefault(find(receipt.id), []).append(receipt.id)
         duplicates = [members for members in groups.values() if len(members) > 1]
+        log.info(
+            "Session %s regrouped into %d duplicate group(s): %s",
+            session_id,
+            len(duplicates),
+            duplicates,
+        )
         self.repository.clear_duplicate_groups(session_id)
         for members in duplicates:
             self.repository.set_duplicate_group(members, str(uuid.uuid4()))

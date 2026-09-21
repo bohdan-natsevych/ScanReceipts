@@ -217,12 +217,26 @@ class OpenCVSource(FrameSource):
         delivers nothing already degrades safely: the worker's read loop gives
         up and reports the source unavailable.
         """
+        # CLAUDE CODE: every set() below is best-effort. A driver is entitled to
+        # ignore a property, and the resolution it actually chose is read back
+        # and logged rather than assumed.
         capture = cv2.VideoCapture(self.camera_index, backend)
         if not capture.isOpened():
             capture.release()
             return None
         if compressed and hasattr(cv2, "CAP_PROP_FOURCC"):
-            capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            try:
+                capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            except Exception:
+                # CLAUDE CODE: some drivers raise rather than answer no, and
+                # OpenCV surfaces it as "Unknown C++ exception". MJPG is an
+                # optimisation; losing the camera over it is not a trade worth
+                # making, so the device keeps whatever format it chose.
+                log.warning(
+                    "%s refused MJPG, keeping its own format",
+                    self.descriptor.name,
+                    exc_info=True,
+                )
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.settings.camera_width)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.settings.camera_height)
         capture.set(cv2.CAP_PROP_FPS, self.settings.camera_fps)

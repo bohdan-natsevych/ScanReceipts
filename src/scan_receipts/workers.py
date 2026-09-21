@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
 import queue
 import threading
@@ -34,6 +35,8 @@ from .update import (
     is_newer,
     latest_release,
 )
+
+log = logging.getLogger(__name__)
 
 # CLAUDE CODE: how far back a manual capture may reach for a steadier frame.
 # Long enough to outlast the shake of pressing the button, short enough that the
@@ -110,6 +113,7 @@ class SourcePreviewWorker(QObject):
                 self.packet_ready.emit(packet)
                 self.preview_ready.emit(frame_to_qimage(packet.frame))
         except Exception as error:
+            log.error("Preview source failed", exc_info=True)
             if self._running:
                 self.failed.emit(str(error))
         finally:
@@ -224,10 +228,12 @@ class DetectionWorker(QObject):
                 self._queue.put_nowait(item)
                 return
             except queue.Full:
+                log.debug("Detection queue full, dropping the oldest frame")
                 with contextlib.suppress(queue.Empty):
                     self._queue.get_nowait()
 
     def _fail(self, message: str) -> None:
+        log.error("Detection worker failing the session: %s", message)
         self._failure_message = message
         self._broken.set()
 
@@ -262,6 +268,12 @@ class DetectionWorker(QObject):
                 metrics, candidate = self.detector.feed(packet)
             except Exception:
                 consecutive_failures += 1
+                log.warning(
+                    "Detector raised on frame %s (%d in a row)",
+                    packet.index,
+                    consecutive_failures,
+                    exc_info=True,
+                )
                 if consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
                     self._fail(
                         f"Detection failed on {consecutive_failures} frames in a row\n"
@@ -400,6 +412,9 @@ class CaptureWorker(QObject):
                     try:
                         recorder.write(packet)
                     except Exception as error:
+                        log.error(
+                            "Recorder failed, continuing without it", exc_info=True
+                        )
                         self.recording_warning.emit(str(error))
                         recorder.close()
                         recorder = None
@@ -438,6 +453,7 @@ class CaptureWorker(QObject):
                     self._detection.pause()
                 self._emit_paused(packet)
         except Exception as error:
+            log.error("Capture loop failed", exc_info=True)
             outcome = (True, f"{error}\n{traceback.format_exc(limit=3)}")
         finally:
             # CURSOR: the detection thread still holds queued frames and its
@@ -610,7 +626,9 @@ class ProcessingWorker(QObject):
                     )
                 self.receipt_saved.emit(record)
             except Exception as error:
+                log.error("Could not save a capture", exc_info=True)
                 self.failed.emit(f"{error}\n{traceback.format_exc(limit=3)}")
             finally:
                 self._queue.task_done()
+        log.info("Processing queue drained")
         self.drained.emit()

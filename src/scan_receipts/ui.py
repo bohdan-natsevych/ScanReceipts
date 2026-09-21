@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections import deque
 from collections.abc import Callable
@@ -89,6 +90,8 @@ from .storage import delete_session_video
 from .update import ReleaseInfo, is_frozen, run_installer
 from .version import APP_VERSION
 from .workers import SourcePreviewWorker, UpdateWorker
+
+log = logging.getLogger(__name__)
 
 
 def reveal(path: str | Path) -> None:
@@ -245,6 +248,7 @@ def trash_with_report(
     CLAUDE CODE: one unreadable file used to abort the whole loop and escape the
     slot, so the rest of the selection survived and the user was told nothing.
     """
+    log.info("%s: trashing %d receipt(s)", title, len(receipts))
     removed: list[int] = []
     failures: list[str] = []
     for receipt in receipts:
@@ -253,8 +257,10 @@ def trash_with_report(
         except OSError as error:
             # CLAUDE CODE: ReceiptProcessor.trash already names each file it could
             # not remove, including the members of a combined sheet.
+            log.warning("Could not trash %s", receipt.filename, exc_info=True)
             failures.append(str(error))
         except Exception as error:
+            log.warning("Could not trash %s", receipt.filename, exc_info=True)
             failures.append(f"{receipt.filename}: {error}")
         else:
             removed.append(receipt.id)
@@ -264,6 +270,7 @@ def trash_with_report(
             title,
             "These receipts are still on disk:\n\n" + "\n".join(failures),
         )
+    log.info("%s: removed %s, %d failure(s)", title, removed, len(failures))
     return removed
 
 
@@ -349,6 +356,7 @@ class DuplicateDeckDialog(QDialog):
         )
 
     def reload(self) -> None:
+        log.debug("Duplicate deck %s: discarding %d card(s)", self.group, len(self.card_buttons))
         while self.cards_layout.count():
             item = self.cards_layout.takeAt(0)
             if item.widget():
@@ -362,7 +370,9 @@ class DuplicateDeckDialog(QDialog):
         self.selection.setText("Click a receipt card to select the copy to save.")
         self.keep_selected_button.setEnabled(False)
         self.delete_selected_button.setEnabled(False)
+        log.info("Duplicate deck %s: %d member(s) remain", self.group, len(receipts))
         if len(receipts) < 2:
+            log.info("Duplicate deck %s dissolved, closing the window", self.group)
             self.accept()
             return
         self.summary.setText(
@@ -410,6 +420,7 @@ class DuplicateDeckDialog(QDialog):
         self.cards_layout.addStretch()
 
     def select_card(self, receipt: ReceiptRecord) -> None:
+        log.debug("Duplicate deck %s: selected %s", self.group, receipt.filename)
         self.selected_receipt = receipt
         for receipt_id, card in self.card_buttons.items():
             card.setChecked(receipt_id == receipt.id)
@@ -441,7 +452,9 @@ class DuplicateDeckDialog(QDialog):
         ):
             return
         self._trash_each(receipts, title)
+        log.debug("Remove every copy: refreshing the review page")
         self.changed.emit()
+        log.debug("Remove every copy: closing the window")
         self.accept()
 
     def mark_all_independent(self) -> None:
@@ -455,6 +468,7 @@ class DuplicateDeckDialog(QDialog):
         except Exception as error:
             QMessageBox.critical(self, title, str(error))
             return
+        log.info("Duplicate deck %s: kept all %d copies", self.group, len(receipts))
         self.changed.emit()
         self.accept()
 
@@ -479,7 +493,9 @@ class DuplicateDeckDialog(QDialog):
         ):
             return
         self._trash_each(others, title)
+        log.debug("Keep selected: refreshing the review page")
         self.changed.emit()
+        log.debug("Keep selected: closing the window")
         self.accept()
 
     def delete_one(self, receipt: ReceiptRecord) -> None:
@@ -493,9 +509,17 @@ class DuplicateDeckDialog(QDialog):
             != QMessageBox.StandardButton.Yes
         ):
             return
+        log.info(
+            "Delete duplicate copy: confirmed for %s (id %s)",
+            receipt.filename,
+            receipt.id,
+        )
         self._trash_each([receipt], title)
+        log.debug("Delete duplicate copy: refreshing the review page")
         self.changed.emit()
+        log.debug("Delete duplicate copy: rebuilding the deck")
         self.reload()
+        log.debug("Delete duplicate copy: finished")
 
 
 class PreviewLabel(QLabel):
@@ -1207,6 +1231,7 @@ class ScanPage(QWidget):
         try:
             run_installer(installer)
         except Exception as error:
+            log.warning("Could not install the update", exc_info=True)
             QMessageBox.warning(self, "Could not install the update", str(error))
             return
         QApplication.quit()
@@ -1237,6 +1262,7 @@ class ScanPage(QWidget):
                 )
                 self.controller.start(source, self._session_folder, initial_packets)
         except Exception as error:
+            log.error("Could not start session", exc_info=True)
             QMessageBox.critical(self, "Could not start session", str(error))
             self.start_source_preview()
 
@@ -1330,6 +1356,7 @@ class ScanPage(QWidget):
                 self.settings.combine_maximum,
             )
         except Exception as error:
+            log.warning("Could not combine receipts", exc_info=True)
             QMessageBox.information(self, "Combine receipts", str(error))
             return
         self.refresh_captures()
@@ -1903,6 +1930,11 @@ class SessionsPage(QWidget):
         QTimer.singleShot(1800, restore)
 
     def refresh_duplicate_decks(self, receipts: list[ReceiptRecord]) -> None:
+        log.debug(
+            "Rebuilding duplicate decks from %d receipt(s), discarding %d tile(s)",
+            len(receipts),
+            self.duplicate_decks_layout.count(),
+        )
         while self.duplicate_decks_layout.count():
             item = self.duplicate_decks_layout.takeAt(0)
             if item.widget():
@@ -1932,14 +1964,18 @@ class SessionsPage(QWidget):
         self.duplicate_decks_layout.addStretch()
 
     def open_duplicate_deck(self, group: str) -> None:
+        log.info("Opening duplicate deck %s", group)
         try:
             dialog = DuplicateDeckDialog(self.repository, group, self)
         except Exception as error:
+            log.warning("Could not open duplicate deck %s", group, exc_info=True)
             QMessageBox.critical(self, "Could not open the duplicates", str(error))
             return
         dialog.changed.connect(self._refresh_current)
         dialog.exec()
+        log.debug("Duplicate deck %s closed, refreshing once more", group)
         self._refresh_current()
+        log.info("Duplicate deck %s done", group)
 
     def open_first_duplicate_deck(self) -> None:
         if not self.current_session:
@@ -2031,6 +2067,7 @@ class SessionsPage(QWidget):
             self.load_receipts([receipt_id], receipt_id)
             self.edit_status.setText("Saved")
         except Exception as error:
+            log.error("Could not edit receipt", exc_info=True)
             QMessageBox.critical(self, "Could not edit receipt", str(error))
 
     def rotate(self, amount: int) -> None:
@@ -2048,6 +2085,7 @@ class SessionsPage(QWidget):
             self.load_receipts(selected_ids, current_id)
             self.edit_status.setText(f"Rotated {len(receipts)} receipt(s)")
         except Exception as error:
+            log.error("Could not rotate receipt", exc_info=True)
             QMessageBox.critical(self, "Could not rotate receipt", str(error))
 
     def crop_receipt(self) -> None:
@@ -2082,6 +2120,7 @@ class SessionsPage(QWidget):
                 self.load_receipts([receipt_id], receipt_id)
                 self.edit_status.setText("Restored preserved camera frame")
             except Exception as error:
+                log.error("Could not restore original", exc_info=True)
                 QMessageBox.critical(self, "Could not restore original", str(error))
 
     def reprocess_receipt(self) -> None:
@@ -2106,6 +2145,7 @@ class SessionsPage(QWidget):
                     f"Redetected and enhanced {len(receipts)} receipt(s) from originals"
                 )
             except Exception as error:
+                log.error("Could not reprocess receipt", exc_info=True)
                 QMessageBox.critical(self, "Could not reprocess receipt", str(error))
 
     def rename_receipt(self) -> None:
@@ -2205,6 +2245,7 @@ class SessionsPage(QWidget):
                 self.settings.combine_maximum,
             )
         except Exception as error:
+            log.warning("Could not combine receipts", exc_info=True)
             QMessageBox.information(self, "Combine receipts", str(error))
             return
         self.current_receipt = sheet
@@ -2219,6 +2260,7 @@ class SessionsPage(QWidget):
         try:
             restored = self.processor.uncombine(receipt)
         except Exception as error:
+            log.warning("Could not uncombine receipt", exc_info=True)
             QMessageBox.information(self, "Uncombine receipt", str(error))
             return
         self.current_receipt = self.repository.get_receipt(restored[0])
@@ -2366,6 +2408,7 @@ class SessionsPage(QWidget):
             dialog.receipt_added.connect(self._refresh_current)
             dialog.exec()
         except Exception as error:
+            log.error("Could not inspect video", exc_info=True)
             QMessageBox.critical(self, "Could not inspect video", str(error))
 
     def run_recovery(self) -> None:
@@ -2398,6 +2441,7 @@ class SessionsPage(QWidget):
             )
             self._refresh_current()
         except Exception as error:
+            log.error("Could not start recovery", exc_info=True)
             QMessageBox.critical(self, "Could not start recovery", str(error))
 
     def request_resume(self) -> None:
@@ -2421,6 +2465,7 @@ class SessionsPage(QWidget):
                 self._delete_video_files()
                 self._refresh_current()
             except Exception as error:
+                log.error("Could not delete video", exc_info=True)
                 QMessageBox.critical(self, "Could not delete video", str(error))
 
     def remove_all_images(self) -> None:
@@ -2476,6 +2521,7 @@ class SessionsPage(QWidget):
                     self.repository.set_video_path(session.id, None)
                 self.repository.remove_session_history(session.id)
         except Exception as error:
+            log.error("Could not delete session", exc_info=True)
             QMessageBox.critical(self, "Could not delete session", str(error))
             return
         self.current_session = None
@@ -2566,8 +2612,10 @@ class SessionsPage(QWidget):
     def _refresh_current(self) -> None:
         if self.current_session:
             session_id = self.current_session.id
+            log.debug("Refreshing session %s", session_id)
             self.current_session = self.repository.get_session(session_id)
             self.refresh(session_id)
+            log.debug("Refreshed session %s", session_id)
 
 
 class SettingsPage(QWidget):

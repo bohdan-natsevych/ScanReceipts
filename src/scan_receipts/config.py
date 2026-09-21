@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import fields
 from pathlib import Path
 from typing import TypeVar
 
 from .models import AppSettings, DetectionSettings, OutputSettings
+
+log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -50,9 +53,15 @@ class SettingsStore:
             loaded.detection = detection
             return loaded
         except (OSError, ValueError, TypeError):
+            log.warning(
+                "Settings at %s could not be read, using defaults",
+                self.path,
+                exc_info=True,
+            )
             return defaults
 
     def save(self, settings: AppSettings) -> None:
+        log.info("Saving settings to %s", self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(settings.to_dict(), indent=2), encoding="utf-8")

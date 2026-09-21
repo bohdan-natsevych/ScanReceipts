@@ -58,6 +58,7 @@ class FakeCapture:
 
 
 class FakeCv2:
+    error = type("error", (Exception,), {})
     CAP_ANY = 0
     CAP_MSMF = 1400
     CAP_PROP_FRAME_WIDTH = 3
@@ -117,3 +118,24 @@ def test_a_camera_that_refuses_mjpg_still_opens(monkeypatch) -> None:
 
     assert len(fake.opened) == 1, "one open, no retry storm on the same device"
     assert source.read() is None
+
+
+def test_a_driver_that_rejects_the_format_does_not_lose_the_camera(monkeypatch) -> None:
+    """cv2.set can raise on its own; her log shows exactly this from _attempt."""
+    source, fake = camera_source(monkeypatch)
+    capture = None
+
+    original = FakeCapture.set
+
+    def explode_on_fourcc(self, prop, value):
+        if prop == FakeCv2.CAP_PROP_FOURCC:
+            raise FakeCv2.error("Unknown C++ exception from OpenCV code")
+        return original(self, prop, value)
+
+    monkeypatch.setattr(FakeCapture, "set", explode_on_fourcc)
+
+    source.open()
+
+    capture = fake.opened[0]
+    assert not capture.released, "a refused format must not cost us the camera"
+    assert capture.props[FakeCv2.CAP_PROP_FRAME_WIDTH] == 1920

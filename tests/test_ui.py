@@ -21,6 +21,7 @@ from PySide6.QtGui import QImage, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QComboBox,
     QDialog,
     QLabel,
     QMessageBox,
@@ -35,7 +36,7 @@ from scan_receipts.diagnostics import (
     configure_logging,
     install_qt_message_handler,
 )
-from scan_receipts.models import CaptureCandidate
+from scan_receipts.models import CameraDescriptor, CaptureCandidate
 from scan_receipts.processing import ReceiptProcessor
 from scan_receipts.ui import (
     DuplicateDeckDialog,
@@ -1109,3 +1110,50 @@ def test_a_preview_that_will_not_stop_blocks_a_second_one(
     page.start_source_preview()
 
     assert not made, "a camera still held by the old worker must not be reopened"
+
+
+def test_the_source_dropdown_is_wide_enough_to_read_a_camera_name(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    long_name = "Elelink 4K Webcam Camera for PC Laptop"
+    monkeypatch.setattr(
+        "scan_receipts.ui.enumerate_cameras",
+        lambda _settings: [
+            CameraDescriptor(id="camera:0:0", name=long_name, backend="OpenCV / MSMF")
+        ],
+    )
+    monkeypatch.setattr(ScanPage, "start_source_preview", lambda self, _index=None: None)
+    repository, _session, settings = saved_session(tmp_path)
+    page = ScanPage(SessionController(repository, settings), settings)
+    qtbot.addWidget(page)
+
+    page.refresh_sources()
+
+    assert page.source_combo.minimumWidth() >= 260
+    assert page.source_combo.sizeAdjustPolicy() == (
+        QComboBox.SizeAdjustPolicy.AdjustToContents
+    )
+
+
+def test_a_source_shows_its_full_name_when_hovered(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    long_name = "Elelink 4K Webcam Camera for PC Laptop"
+    monkeypatch.setattr(
+        "scan_receipts.ui.enumerate_cameras",
+        lambda _settings: [
+            CameraDescriptor(id="camera:0:0", name=long_name, backend="OpenCV / MSMF")
+        ],
+    )
+    monkeypatch.setattr(ScanPage, "start_source_preview", lambda self, _index=None: None)
+    repository, _session, settings = saved_session(tmp_path)
+    page = ScanPage(SessionController(repository, settings), settings)
+    qtbot.addWidget(page)
+
+    page.refresh_sources()
+
+    item_hint = page.source_combo.itemData(0, Qt.ItemDataRole.ToolTipRole)
+    assert item_hint and long_name in item_hint
+    assert "OpenCV / MSMF" in item_hint
+    page.source_combo.setCurrentIndex(0)
+    assert long_name in page.source_combo.toolTip()

@@ -887,6 +887,7 @@ class ScanPage(QWidget):
         self._session_folder: Path | None = None
         self._preview_thread: QThread | None = None
         self._preview_worker: SourcePreviewWorker | None = None
+        self._preview_pending = False
         self._update_thread: QThread | None = None
         self._update_worker: UpdateWorker | None = None
         self._update_progress_dialog: QProgressDialog | None = None
@@ -1038,7 +1039,7 @@ class ScanPage(QWidget):
         if not self._sources:
             self.source_combo.setCurrentIndex(self.source_combo.count() - 1)
         self.source_combo.blockSignals(False)
-        QTimer.singleShot(0, self.start_source_preview)
+        self._schedule_preview()
 
     def choose_video(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -1087,11 +1088,35 @@ class ScanPage(QWidget):
             return VideoFileSource(self._video_path)
         return None
 
+    def _schedule_preview(self) -> None:
+        """Ask for one preview start, however many callers asked at once.
+
+        CLAUDE CODE: the tab becoming visible, the source list refilling and a
+        session ending each wanted a preview, and each posted its own timer. Two
+        of them opening the same device a moment apart is what crashed inside
+        OpenCV - one worker was still in the middle of open() while the next
+        started setting properties on the same camera.
+        """
+        if self._preview_pending:
+            return
+        self._preview_pending = True
+        QTimer.singleShot(0, self._start_scheduled_preview)
+
+    def _start_scheduled_preview(self) -> None:
+        self._preview_pending = False
+        self.start_source_preview()
+
     def start_source_preview(self, _index: int | None = None) -> None:
         if self.controller.active:
             return
         self._preview_packets.clear()
-        self.stop_source_preview()
+        if not self.stop_source_preview():
+            # CLAUDE CODE: the old worker still holds the device. Opening it
+            # again from here is the concurrent open that crashes, so wait and
+            # let the next attempt find it released.
+            log.warning("Preview source is still closing; leaving the camera alone")
+            QTimer.singleShot(500, self._schedule_preview)
+            return
         source = self._selected_source()
         if source is None:
             return
@@ -1138,16 +1163,21 @@ class ScanPage(QWidget):
         )
         self.capabilities_ready.emit(capabilities)
 
-    def stop_source_preview(self) -> None:
+    def stop_source_preview(self) -> bool:
+        """Release the preview source. False when the worker has not let go yet."""
         worker, thread = self._preview_worker, self._preview_thread
         self._preview_worker = None
         self._preview_thread = None
         if worker is not None:
             worker.stop()
-        if thread is not None:
-            thread.quit()
-            if thread.isRunning():
-                thread.wait(3000)
+        if thread is None:
+            return True
+        thread.quit()
+        if thread.isRunning() and not thread.wait(3000):
+            self._preview_thread = thread
+            self._preview_worker = worker
+            return False
+        return True
 
     def check_for_updates(self) -> None:
         if self._update_thread is not None:
@@ -1320,12 +1350,12 @@ class ScanPage(QWidget):
         self._session_folder = None
         self._update_folder_value()
         if self.isVisible():
-            QTimer.singleShot(0, self.start_source_preview)
+            self._schedule_preview()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         if not self.controller.active and self._preview_thread is None:
-            QTimer.singleShot(0, self.start_source_preview)
+            self._schedule_preview()
 
     def hideEvent(self, event) -> None:  # noqa: N802
         """Let go of the camera whenever this tab is not the one on screen.

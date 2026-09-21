@@ -34,6 +34,7 @@ class FakeCapture:
             FakeCv2.CAP_PROP_FOURCC: 844715353.0,  # YUY2
         }
         self.released = False
+        self.reads = 0
 
     def isOpened(self) -> bool:  # noqa: N802
         return True
@@ -47,6 +48,7 @@ class FakeCapture:
         return self.props.get(prop, 0.0)
 
     def read(self):
+        self.reads += 1
         if self.props.get(FakeCv2.CAP_PROP_FOURCC) == MJPG and not self.mjpg_delivers:
             return False, None
         return True, np.zeros((4, 4, 3), np.uint8)
@@ -99,14 +101,19 @@ def test_a_usb_camera_is_asked_for_mjpg_before_its_resolution(monkeypatch) -> No
     ), "the format must be negotiated before the resolution"
 
 
-def test_a_camera_that_cannot_deliver_mjpg_falls_back_to_its_default(
-    monkeypatch,
-) -> None:
+def test_opening_a_camera_never_reads_a_frame(monkeypatch) -> None:
+    """Probing with read() during open cost an access violation inside OpenCV."""
+    source, fake = camera_source(monkeypatch)
+
+    source.open()
+
+    assert fake.opened[0].reads == 0, "open() must not pull frames from the device"
+
+
+def test_a_camera_that_refuses_mjpg_still_opens(monkeypatch) -> None:
     source, fake = camera_source(monkeypatch, mjpg_delivers=False)
 
     source.open()
 
-    assert len(fake.opened) == 2, "a refused format must be retried without it"
-    assert fake.opened[0].released, "the failed attempt must be released"
-    assert MJPG not in [value for _prop, value in fake.opened[1].calls]
-    assert source.read() is not None
+    assert len(fake.opened) == 1, "one open, no retry storm on the same device"
+    assert source.read() is None

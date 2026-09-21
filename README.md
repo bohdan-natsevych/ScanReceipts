@@ -93,6 +93,22 @@ The live diagnostics overlay is intentionally enabled by default. Camera and
 lighting setups vary, so motion, stability, sharpness, boundary confidence, and
 the detector state remain visible and thresholds can be tuned in Settings.
 
+## Camera formats
+
+A USB webcam defaults to uncompressed YUY2. At 1080p30 that is roughly 124 MB/s,
+more than a USB 2.0 path can carry, and the driver answers by collapsing the
+frame rate - which is why a camera can look smooth in Teams, which asks for
+MJPG, and slow here. The app now requests MJPG before it sets the resolution,
+checks that frames actually arrive, and falls back to the device default if they
+do not. The negotiated format is in the log:
+
+```
+Camera 1 delivers 1920.0x1080.0 @ 30.0 fps as MJPG
+```
+
+If that line says `YUY2` and the preview is slow, the camera refused MJPG at
+that resolution; lower it in Settings.
+
 ## Hardware and corpus validation
 
 The code cannot certify camera-driver behavior without the target devices. Run

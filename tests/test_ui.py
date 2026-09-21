@@ -1011,3 +1011,63 @@ def test_qt_warnings_and_fatal_messages_reach_the_log(tmp_path: Path, monkeypatc
         qInstallMessageHandler(None)
 
     assert "Destroyed while thread is still running" in log.read_text(encoding="utf-8")
+
+
+def test_leaving_the_scan_tab_releases_the_camera(qtbot, tmp_path: Path, monkeypatch) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    page.show()
+    qtbot.waitExposed(page)
+    qtbot.wait(20)
+    stopped: list[str] = []
+    real_stop = ScanPage.stop_source_preview
+    monkeypatch.setattr(
+        ScanPage,
+        "stop_source_preview",
+        lambda self: (stopped.append("stop"), real_stop(self))[1],
+    )
+
+    page.hide()
+
+    assert stopped, "hiding the scan tab must release the camera"
+
+
+def test_a_finished_session_does_not_reopen_the_camera_behind_another_tab(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, session = scanning_page(qtbot, tmp_path, monkeypatch)
+    page.show()
+    qtbot.waitExposed(page)
+    page.hide()
+    qtbot.wait(20)
+    started: list[str] = []
+    monkeypatch.setattr(
+        ScanPage,
+        "start_source_preview",
+        lambda self, _index=None: started.append("start"),
+    )
+
+    page.on_finished(SimpleNamespace(id=session.id))
+    qtbot.wait(50)
+
+    assert not started, "a hidden scan tab must not restart the preview"
+
+
+def test_returning_to_the_scan_tab_brings_the_preview_back(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    page.show()
+    qtbot.waitExposed(page)
+    page.hide()
+    qtbot.wait(20)
+    started: list[str] = []
+    monkeypatch.setattr(
+        ScanPage,
+        "start_source_preview",
+        lambda self, _index=None: started.append("start"),
+    )
+
+    page.show()
+    qtbot.wait(50)
+
+    assert started, "showing the scan tab again must restart the preview"

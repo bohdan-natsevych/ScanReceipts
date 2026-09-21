@@ -7,7 +7,6 @@ without a running application.
 from __future__ import annotations
 
 import json
-import logging
 import re
 import subprocess
 import sys
@@ -39,9 +38,6 @@ GITHUB_HOSTS = frozenset(
 )
 
 _VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
-
-
-log = logging.getLogger(__name__)
 
 
 class UpdateError(RuntimeError):
@@ -84,11 +80,9 @@ def latest_release(open_url=urllib.request.urlopen) -> ReleaseInfo:
         with open_url(request, timeout=15) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, ValueError) as error:
-        log.warning("Could not reach GitHub for the latest release", exc_info=True)
         raise UpdateError(f"Could not reach GitHub: {error}") from error
 
     tag = str(payload.get("tag_name") or "")
-    log.info("Latest published release is %s", tag or "<untagged>")
     if not tag:
         raise UpdateError("The latest release has no tag")
     page_url = str(payload.get("html_url") or RELEASES_PAGE)
@@ -132,18 +126,14 @@ def download_installer(
                     if progress is not None and total:
                         progress(min(100, int(received * 100 / total)))
     except (OSError, ValueError) as error:
-        log.error("Installer download failed, discarding %s", target, exc_info=True)
         target.unlink(missing_ok=True)
         raise UpdateError(f"Could not download the installer: {error}") from error
-    log.info("Downloaded the installer to %s", target)
     return target
 
 
 def run_installer(installer: Path, popen=subprocess.Popen) -> None:
     """Start the installer detached; the caller quits so it can replace the app."""
-    log.info("Starting the installer %s", installer)
     try:
         popen([str(installer), *INSTALLER_ARGUMENTS], close_fds=True)
     except OSError as error:
-        log.error("Could not start the installer %s", installer, exc_info=True)
         raise UpdateError(f"Could not start the installer: {error}") from error

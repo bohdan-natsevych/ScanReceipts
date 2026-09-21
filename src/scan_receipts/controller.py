@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
@@ -20,8 +19,6 @@ from .models import (
 )
 from .processing import ReceiptProcessor
 from .workers import CaptureWorker, ProcessingWorker
-
-log = logging.getLogger(__name__)
 
 
 class SessionController(QObject):
@@ -70,12 +67,6 @@ class SessionController(QObject):
         self.session = self.repository.create_session(
             source.descriptor.name, self.settings, receipt_folder
         )
-        log.info(
-            "Starting session %s on %s, receipts to %s",
-            self.session.id,
-            source.descriptor.name,
-            self.session.receipt_folder,
-        )
         if isinstance(source, VideoFileSource):
             self.repository.set_video_path(self.session.id, str(source.path))
             self.session.video_path = str(source.path)
@@ -85,7 +76,6 @@ class SessionController(QObject):
         if self.active:
             raise RuntimeError("A session is already active")
         self.session = self.repository.resume_session(session_id)
-        log.info("Resuming session %s on %s", session_id, source.descriptor.name)
         self._launch(source, "session_resumed")
 
     def _launch(
@@ -162,7 +152,6 @@ class SessionController(QObject):
     def stop(self) -> None:
         if not self.session or self._stopping:
             return
-        log.info("Stopping session %s", self.session.id)
         self._stopping = True
         self.repository.update_session_status(
             self.session.id,
@@ -258,19 +247,12 @@ class SessionController(QObject):
             refreshed = self.repository.get_session(self.session.id)
             if refreshed:
                 self.session = refreshed
-        flag = getattr(receipt, "quality_flag", None)
-        log.info(
-            "Saved receipt %s%s",
-            getattr(receipt, "filename", receipt),
-            f" flagged {flag}" if flag else "",
-        )
-        if flag:
+        if getattr(receipt, "quality_flag", None):
             self._had_flag = True
         self.receipt_saved.emit(receipt)
 
     @Slot(str)
     def _on_processing_error(self, message: str) -> None:
-        log.error("Processing failed: %s", message)
         self._had_error = True
         if self.session:
             self.repository.log_event(
@@ -305,12 +287,6 @@ class SessionController(QObject):
             ended=True,
         )
         self.session = self.repository.get_session(self.session.id)
-        log.info(
-            "Session %s finished as %s with %d receipt(s)",
-            self.session.id,
-            target.value,
-            self.session.receipt_count,
-        )
         self.repository.log_event(self.session.id, "processing_drained", {})
         self.session_finished.emit(self.session)
         self._cleanup_threads()
@@ -319,7 +295,6 @@ class SessionController(QObject):
     def _on_source_ended(self, disconnected: bool, message: str) -> None:
         if not self.session or self._stopping:
             return
-        log.warning("Frame source ended (disconnected=%s): %s", disconnected, message)
         if disconnected:
             self._had_error = True
             self.repository.update_session_status(
@@ -335,7 +310,6 @@ class SessionController(QObject):
 
     @Slot(str)
     def _on_recording_warning(self, message: str) -> None:
-        log.warning("Recording stopped but capture continues: %s", message)
         if self.session:
             self.repository.log_event(
                 self.session.id, "recording_error", {"message": message}
@@ -343,7 +317,6 @@ class SessionController(QObject):
         self.notice.emit(f"Recording stopped, but receipt capture continues: {message}")
 
     def _cleanup_threads(self) -> None:
-        log.debug("Tearing down capture and processing threads")
         if self._capture_thread is not None:
             self._capture_thread.quit()
             self._capture_thread.wait(1000)

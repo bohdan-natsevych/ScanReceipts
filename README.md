@@ -36,6 +36,47 @@ Use **Video file...** in the Source list to replay a recording. Receipt images
 default to `Documents\Receipts`; recordings and SQLite metadata live under
 `%LOCALAPPDATA%\ScanReceipts`. All locations are visible in Settings.
 
+## Logs
+
+Every run appends to `%LOCALAPPDATA%\ScanReceipts\logs\scan_receipts.log`, which
+rotates at 50 MB and keeps 10 files. `INFO` is the default: sessions, captures,
+saves, deletions, duplicate grouping and every handled error. Unhandled
+exceptions are recorded with their traceback, from worker threads as well as the
+UI thread, and a native crash inside Qt or OpenCV dumps its stacks to
+`scan_receipts.fault.log` beside it.
+
+A run that ends normally writes `exited cleanly` as its last line. A log without
+that line was killed from underneath, which is the difference between a bug and
+a crash.
+
+To reproduce a problem with the full trace, raise the level before starting:
+
+```powershell
+$env:SCANRECEIPTS_LOG_LEVEL = "DEBUG"
+uv run scan-receipts
+```
+
+`DEBUG` adds per-file Recycle Bin operations, detector candidates and each step
+of the review and duplicate windows. The variable is read at startup, so it
+works on an installed build without a new release.
+
+Qt's own messages are logged too, under `scan_receipts.qt`. That matters because
+Qt ends the process itself for some conditions - a `QThread` destroyed while
+still running, for instance - by printing one line and calling `abort()`. No
+Python hook can see that, so without this the app simply vanishes.
+
+If a machine still dies with nothing in the log, ask Windows for a dump:
+
+```powershell
+# once, in an Administrator PowerShell, on the machine that reproduces it
+.\tools\debug\enable-crash-dumps.ps1
+```
+
+Dumps land in `%LOCALAPPDATA%\ScanReceipts\dumps` (minidumps, a few MB each).
+`.\tools\debug\enable-crash-dumps.ps1 -Remove` switches it off again, and
+`.\tools\debug\collect-crash.ps1` gathers the Windows-side records into one file
+to send.
+
 ## Detection workflow
 
 Start a session, put one receipt under the selected camera, and hold it reasonably

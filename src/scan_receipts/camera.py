@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import time
@@ -18,6 +19,8 @@ except (
     cv2 = None  # type: ignore[assignment]
 
 from .models import AppSettings, CameraCapability, CameraDescriptor, FramePacket
+
+log = logging.getLogger(__name__)
 
 
 class CameraError(RuntimeError):
@@ -176,9 +179,18 @@ class OpenCVSource(FrameSource):
         backend = self.backend
         if backend is None:
             backend = cv2.CAP_MSMF if hasattr(cv2, "CAP_MSMF") else cv2.CAP_ANY
+        log.info(
+            "Opening %s (index %s) at %sx%s @ %s fps",
+            self.descriptor.name,
+            self.camera_index,
+            self.settings.camera_width,
+            self.settings.camera_height,
+            self.settings.camera_fps,
+        )
         capture = cv2.VideoCapture(self.camera_index, backend)
         if not capture.isOpened():
             capture.release()
+            log.error("Could not open %s", self.descriptor.name)
             raise CameraError(f"Could not open {self.descriptor.name}")
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.settings.camera_width)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.settings.camera_height)
@@ -187,6 +199,12 @@ class OpenCVSource(FrameSource):
             capture.set(cv2.CAP_PROP_AUTOFOCUS, 1 if self.settings.autofocus else 0)
         self._capture = capture
         self._opened_at = time.monotonic()
+        log.info(
+            "%s delivers %sx%s",
+            self.descriptor.name,
+            capture.get(cv2.CAP_PROP_FRAME_WIDTH),
+            capture.get(cv2.CAP_PROP_FRAME_HEIGHT),
+        )
         self._apply_controls()
 
     def _apply_controls(self) -> None:
@@ -216,6 +234,7 @@ class OpenCVSource(FrameSource):
 
             ranges = control_ranges(self.descriptor.name)
         except Exception:
+            log.debug("DirectShow control ranges unavailable", exc_info=True)
             ranges = {}
         exposure = ranges.get("exposure")
         if exposure is not None and hasattr(cv2, "CAP_PROP_EXPOSURE"):
@@ -236,6 +255,7 @@ class OpenCVSource(FrameSource):
 
     def close(self) -> None:
         if self._capture is not None:
+            log.info("Closing %s", self.descriptor.name)
             self._capture.release()
             self._capture = None
 
@@ -274,7 +294,7 @@ class OpenCVSource(FrameSource):
                 capabilities, control_ranges(self.descriptor.name)
             )
         except Exception:
-            pass
+            log.debug("DirectShow capabilities unavailable", exc_info=True)
         return capabilities
 
 
@@ -298,8 +318,10 @@ class VideoFileSource(FrameSource):
 
     def open(self) -> None:
         require_opencv()
+        log.info("Opening video file %s", self.path)
         capture = cv2.VideoCapture(str(self.path))
         if not capture.isOpened():
+            log.error("Could not open video %s", self.path)
             raise CameraError(f"Could not open video: {self.path}")
         self._capture = capture
         self._fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
@@ -321,6 +343,7 @@ class VideoFileSource(FrameSource):
 
     def close(self) -> None:
         if self._capture is not None:
+            log.info("Closing video file %s", self.path)
             self._capture.release()
             self._capture = None
 
@@ -384,6 +407,7 @@ def windows_camera_names() -> list[str]:
         )
         return _parse_dshow_device_names(result.stdout + "\n" + result.stderr)
     except (OSError, subprocess.SubprocessError):
+        log.warning("Could not enumerate DirectShow devices", exc_info=True)
         return []
 
 
@@ -456,6 +480,7 @@ class SegmentedRecorder:
             try:
                 existing.append(int(path.stem.rsplit("_", 1)[1]))
             except ValueError:
+                log.debug("Ignoring unnumbered segment %s", path)
                 continue
         self._sequence = max(existing, default=0)
         self.paths: list[Path] = []

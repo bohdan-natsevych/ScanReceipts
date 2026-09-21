@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import gc
 import os
 import sys
+import time
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -49,6 +52,7 @@ from scan_receipts.ui import (
     install_smooth_scroll,
 )
 from scan_receipts.version import APP_VERSION
+from scan_receipts.workers import SourcePreviewWorker
 
 pytestmark = pytest.mark.gui
 
@@ -1157,3 +1161,165 @@ def test_a_source_shows_its_full_name_when_hovered(
     assert "OpenCV / MSMF" in item_hint
     page.source_combo.setCurrentIndex(0)
     assert long_name in page.source_combo.toolTip()
+
+
+class RecordingSource:
+    """A frame source that records whether it was ever opened."""
+
+    is_replay = False
+
+    def __init__(self) -> None:
+        self.opened = False
+        self.closed = False
+
+    def open(self) -> None:
+        self.opened = True
+
+    def read(self):
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    def capabilities(self):
+        return []
+
+
+def test_a_preview_stopped_before_it_runs_never_opens_the_camera(qtbot) -> None:
+    source = RecordingSource()
+    worker = SourcePreviewWorker(source)
+
+    worker.stop()
+    worker.run()
+
+    assert not source.opened, "run() must not undo a stop that already arrived"
+
+
+def test_stopping_a_preview_does_not_block_the_gui_thread(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    waits: list[int] = []
+    page._preview_worker = SimpleNamespace(stop=lambda: None)
+    page._preview_thread = SimpleNamespace(
+        isRunning=lambda: True,
+        quit=lambda: None,
+        wait=lambda ms: waits.append(ms) or True,
+    )
+
+    free = page.stop_source_preview()
+
+    assert not waits, "the GUI thread must never wait on the preview thread"
+    assert free is False, "a running preview means the camera is not free yet"
+
+
+def test_the_camera_is_free_again_once_the_preview_thread_finishes(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    thread = SimpleNamespace(isRunning=lambda: True, quit=lambda: None)
+    page._preview_worker = SimpleNamespace(stop=lambda: None)
+    page._preview_thread = thread
+    assert page.stop_source_preview() is False
+
+    page._preview_finished(thread)
+
+    assert page.stop_source_preview() is True
+
+
+def test_a_preview_that_never_releases_does_not_retry_forever(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    monkeypatch.setattr(ScanPage, "stop_source_preview", lambda self: False)
+    monkeypatch.setattr(
+        ScanPage, "_selected_source", lambda self: SimpleNamespace()
+    )
+    reported: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _p, _t, text, *a, **k: reported.append(text),
+    )
+    page._video_path = tmp_path / "replay.mp4"
+    page._preview_release_deadline = time.monotonic() - 1
+
+    page.start()
+
+    assert reported, "giving up must say so rather than retry in silence"
+
+
+def test_a_preview_retry_gives_up_instead_of_spinning(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    monkeypatch.setattr(ScanPage, "stop_source_preview", lambda self: False)
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        ScanPage, "_schedule_preview", lambda self: scheduled.append("again")
+    )
+    page._preview_release_deadline = time.monotonic() - 1
+
+    page.start_source_preview()
+
+    assert not scheduled, "a preview that never frees the camera must stop retrying"
+def test_rebuilding_a_deck_destroys_each_card_exactly_once(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """A posted deleteLater surviving into another teardown is the purecall."""
+    repository, session, _settings = saved_session(tmp_path, 3)
+    group = repository.list_receipts(session.id)[0].duplicate_group
+    dialog = DuplicateDeckDialog(repository, group)
+    qtbot.addWidget(dialog)
+    doomed = weakref.ref(next(iter(dialog.card_buttons.values())))
+    assert doomed() is not None
+
+    dialog.reload()
+    gc.collect()
+
+    assert doomed() is None, "the old card must be gone, not queued for deletion"
+
+
+def test_rebuilding_the_decks_destroys_each_tile_exactly_once(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    repository, session, settings = saved_session(tmp_path, 3)
+    page = SessionsPage(repository, settings)
+    qtbot.addWidget(page)
+    page.refresh(session.id)
+    doomed = weakref.ref(page.duplicate_decks_layout.itemAt(0).widget())
+    assert doomed() is not None
+
+    page.refresh(session.id)
+    gc.collect()
+
+    assert doomed() is None, "the old tile must be gone, not queued for deletion"
+
+
+def test_a_deck_is_refreshed_once_after_it_closes_not_from_inside_it(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    repository, session, settings = saved_session(tmp_path, 3)
+    page = SessionsPage(repository, settings)
+    qtbot.addWidget(page)
+    page.refresh(session.id)
+    group = repository.list_receipts(session.id)[0].duplicate_group
+    inside: list[str] = []
+    monkeypatch.setattr(
+        DuplicateDeckDialog,
+        "exec",
+        lambda self: inside.append("during") if page._refresh_calls else None,
+    )
+    page._refresh_calls = []
+    real = SessionsPage._refresh_current
+    monkeypatch.setattr(
+        SessionsPage,
+        "_refresh_current",
+        lambda self: (page._refresh_calls.append("refresh"), real(self))[1],
+    )
+
+    page.open_duplicate_deck(group)
+
+    assert page._refresh_calls == [], "no refresh may run inside the modal loop"
+    qtbot.wait(50)
+    assert page._refresh_calls == ["refresh"], "exactly one refresh, after it closes"

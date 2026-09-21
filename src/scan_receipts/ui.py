@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime
@@ -870,6 +871,7 @@ class CaptureStrip(QListWidget):
 
 class ScanPage(QWidget):
     SOURCE_COMBO_WIDTH = 320
+    PREVIEW_RELEASE_SECONDS = 5.0
     capabilities_ready = Signal(object)
     settings_changed = Signal()
     request_download = Signal(object)
@@ -889,6 +891,7 @@ class ScanPage(QWidget):
         self._preview_thread: QThread | None = None
         self._preview_worker: SourcePreviewWorker | None = None
         self._preview_pending = False
+        self._preview_release_deadline: float | None = None
         self._update_thread: QThread | None = None
         self._update_worker: UpdateWorker | None = None
         self._update_progress_dialog: QProgressDialog | None = None
@@ -1137,11 +1140,21 @@ class ScanPage(QWidget):
         self._preview_packets.clear()
         if not self.stop_source_preview():
             # CLAUDE CODE: the old worker still holds the device. Opening it
-            # again from here is the concurrent open that crashes, so wait and
-            # let the next attempt find it released.
-            log.warning("Preview source is still closing; leaving the camera alone")
-            QTimer.singleShot(500, self._schedule_preview)
+            # again from here is the concurrent open that crashes, so wait for it
+            # - bounded, because a wedged worker would otherwise have this
+            # retrying and logging every half second for the rest of the run.
+            if self._preview_release_deadline is None:
+                self._preview_release_deadline = (
+                    time.monotonic() + self.PREVIEW_RELEASE_SECONDS
+                )
+            if time.monotonic() < self._preview_release_deadline:
+                log.debug("Preview source is still closing; trying again shortly")
+                QTimer.singleShot(500, self._schedule_preview)
+                return
+            log.warning("Preview source never released the camera; giving up")
+            self.diagnostics.setText("Preview unavailable: the camera is still in use")
             return
+        self._preview_release_deadline = None
         source = self._selected_source()
         if source is None:
             return
@@ -1175,6 +1188,7 @@ class ScanPage(QWidget):
 
     def _preview_finished(self, thread: QThread) -> None:
         if self._preview_thread is thread:
+            log.debug("Preview thread finished; the camera is free")
             self._preview_worker = None
             self._preview_thread = None
 
@@ -1189,20 +1203,24 @@ class ScanPage(QWidget):
         self.capabilities_ready.emit(capabilities)
 
     def stop_source_preview(self) -> bool:
-        """Release the preview source. False when the worker has not let go yet."""
+        """Ask the preview to let the camera go. False while it is still closing.
+
+        CLAUDE CODE: this never waits. Blocking the GUI thread on a worker that
+        is three seconds deep inside a webcam open froze the window and timed
+        out anyway, leaving the device held. The worker closes its own source on
+        the way out and _preview_finished clears these fields, so the honest
+        answer here is simply whether that has happened yet.
+        """
         worker, thread = self._preview_worker, self._preview_thread
-        self._preview_worker = None
-        self._preview_thread = None
         if worker is not None:
             worker.stop()
-        if thread is None:
+        if thread is None or not thread.isRunning():
+            self._preview_worker = None
+            self._preview_thread = None
             return True
         thread.quit()
-        if thread.isRunning() and not thread.wait(3000):
-            self._preview_thread = thread
-            self._preview_worker = worker
-            return False
-        return True
+        log.debug("Preview is still closing; the camera is not free yet")
+        return False
 
     def check_for_updates(self) -> None:
         if self._update_thread is not None:
@@ -1302,7 +1320,29 @@ class ScanPage(QWidget):
                 self.choose_video()
             if self._video_path is None:
                 return
-        self.stop_source_preview()
+        if not self.stop_source_preview():
+            # CLAUDE CODE: opening the camera for a session while the preview
+            # still has it is the concurrent open that crashes inside OpenCV, so
+            # this waits rather than forcing it - but it gives up out loud, and
+            # never spins here forever.
+            if self._preview_release_deadline is None:
+                self._preview_release_deadline = (
+                    time.monotonic() + self.PREVIEW_RELEASE_SECONDS
+                )
+            if time.monotonic() < self._preview_release_deadline:
+                log.info("Waiting for the preview to release the camera")
+                QTimer.singleShot(250, self.start)
+                return
+            self._preview_release_deadline = None
+            log.error("The preview never released the camera; refusing to start")
+            QMessageBox.critical(
+                self,
+                "Could not start session",
+                "The camera is still in use by the preview. Choose a different "
+                "source, or restart the application.",
+            )
+            return
+        self._preview_release_deadline = None
         source = self._selected_source()
         if source is None:
             return
@@ -1379,6 +1419,7 @@ class ScanPage(QWidget):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        log.debug("Scan tab shown")
         if not self.controller.active and self._preview_thread is None:
             self._schedule_preview()
 
@@ -1391,6 +1432,7 @@ class ScanPage(QWidget):
         the preview here cannot interrupt one.
         """
         super().hideEvent(event)
+        log.debug("Scan tab hidden; releasing the preview source")
         self.stop_source_preview()
 
     def on_saved(self, receipt: ReceiptRecord) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -49,6 +50,7 @@ from scan_receipts.ui import (
     install_smooth_scroll,
 )
 from scan_receipts.version import APP_VERSION
+from scan_receipts.workers import SourcePreviewWorker
 
 pytestmark = pytest.mark.gui
 
@@ -1157,3 +1159,105 @@ def test_a_source_shows_its_full_name_when_hovered(
     assert "OpenCV / MSMF" in item_hint
     page.source_combo.setCurrentIndex(0)
     assert long_name in page.source_combo.toolTip()
+
+
+class RecordingSource:
+    """A frame source that records whether it was ever opened."""
+
+    is_replay = False
+
+    def __init__(self) -> None:
+        self.opened = False
+        self.closed = False
+
+    def open(self) -> None:
+        self.opened = True
+
+    def read(self):
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    def capabilities(self):
+        return []
+
+
+def test_a_preview_stopped_before_it_runs_never_opens_the_camera(qtbot) -> None:
+    source = RecordingSource()
+    worker = SourcePreviewWorker(source)
+
+    worker.stop()
+    worker.run()
+
+    assert not source.opened, "run() must not undo a stop that already arrived"
+
+
+def test_stopping_a_preview_does_not_block_the_gui_thread(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    waits: list[int] = []
+    page._preview_worker = SimpleNamespace(stop=lambda: None)
+    page._preview_thread = SimpleNamespace(
+        isRunning=lambda: True,
+        quit=lambda: None,
+        wait=lambda ms: waits.append(ms) or True,
+    )
+
+    free = page.stop_source_preview()
+
+    assert not waits, "the GUI thread must never wait on the preview thread"
+    assert free is False, "a running preview means the camera is not free yet"
+
+
+def test_the_camera_is_free_again_once_the_preview_thread_finishes(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    thread = SimpleNamespace(isRunning=lambda: True, quit=lambda: None)
+    page._preview_worker = SimpleNamespace(stop=lambda: None)
+    page._preview_thread = thread
+    assert page.stop_source_preview() is False
+
+    page._preview_finished(thread)
+
+    assert page.stop_source_preview() is True
+
+
+def test_a_preview_that_never_releases_does_not_retry_forever(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    monkeypatch.setattr(ScanPage, "stop_source_preview", lambda self: False)
+    monkeypatch.setattr(
+        ScanPage, "_selected_source", lambda self: SimpleNamespace()
+    )
+    reported: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _p, _t, text, *a, **k: reported.append(text),
+    )
+    page._video_path = tmp_path / "replay.mp4"
+    page._preview_release_deadline = time.monotonic() - 1
+
+    page.start()
+
+    assert reported, "giving up must say so rather than retry in silence"
+
+
+def test_a_preview_retry_gives_up_instead_of_spinning(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    monkeypatch.setattr(ScanPage, "stop_source_preview", lambda self: False)
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        ScanPage, "_schedule_preview", lambda self: scheduled.append("again")
+    )
+    page._preview_release_deadline = time.monotonic() - 1
+
+    page.start_source_preview()
+
+    assert not scheduled, "a preview that never frees the camera must stop retrying"

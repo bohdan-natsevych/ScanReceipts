@@ -92,16 +92,29 @@ class SourcePreviewWorker(QObject):
     def __init__(self, source: FrameSource) -> None:
         super().__init__()
         self.source = source
-        self._running = False
+        # CLAUDE CODE: an Event, not a bool, because stop() is called from the
+        # GUI thread and run() from this one. run() used to begin by setting the
+        # flag True, which quietly undid a stop that had already arrived while
+        # the thread was still starting - the preview then held the camera for
+        # the rest of the session.
+        self._stop = threading.Event()
 
     @Slot()
     def run(self) -> None:
-        self._running = True
         failed_reads = 0
         try:
+            if self._stop.is_set():
+                log.debug("Preview was stopped before it opened the source")
+                return
             self.source.open()
+            # CLAUDE CODE: open() takes seconds on a webcam, and a stop asked
+            # for during it has to be honoured the moment it returns - before a
+            # single frame is read.
+            if self._stop.is_set():
+                log.debug("Preview was stopped while the source was opening")
+                return
             self.opened.emit(self.source.capabilities())
-            while self._running:
+            while not self._stop.is_set():
                 packet = self.source.read()
                 if packet is None:
                     failed_reads += 1
@@ -114,16 +127,16 @@ class SourcePreviewWorker(QObject):
                 self.preview_ready.emit(frame_to_qimage(packet.frame))
         except Exception as error:
             log.error("Preview source failed", exc_info=True)
-            if self._running:
+            if not self._stop.is_set():
                 self.failed.emit(str(error))
         finally:
-            self._running = False
+            self._stop.set()
             self.source.close()
             self.finished.emit()
 
     @Slot()
     def stop(self) -> None:
-        self._running = False
+        self._stop.set()
 
 
 class UpdateWorker(QObject):

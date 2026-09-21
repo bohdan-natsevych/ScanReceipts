@@ -1319,7 +1319,24 @@ class ScanPage(QWidget):
         self.update_button.setEnabled(True)
         self._session_folder = None
         self._update_folder_value()
-        QTimer.singleShot(0, self.start_source_preview)
+        if self.isVisible():
+            QTimer.singleShot(0, self.start_source_preview)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not self.controller.active and self._preview_thread is None:
+            QTimer.singleShot(0, self.start_source_preview)
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        """Let go of the camera whenever this tab is not the one on screen.
+
+        CLAUDE CODE: the preview used to keep streaming while the user worked in
+        Review, holding the device open and pushing full-resolution frames at a
+        window nobody could see. A session owns the camera itself, so stopping
+        the preview here cannot interrupt one.
+        """
+        super().hideEvent(event)
+        self.stop_source_preview()
 
     def on_saved(self, receipt: ReceiptRecord) -> None:
         self._session_id = receipt.session_id

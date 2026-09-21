@@ -18,6 +18,7 @@ LOGGER_NAME = "scan_receipts"
 MAXIMUM_LOG_BYTES = 50 * 1024 * 1024
 LOG_BACKUPS = 10
 LEVEL_VARIABLE = "SCANRECEIPTS_LOG_LEVEL"
+LEVEL_NAMES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 FORMAT = "%(asctime)s %(levelname)-8s [%(threadName)s] %(name)s: %(message)s"
 
 _fault_file = None
@@ -50,7 +51,8 @@ def configure_logging(
     path = log_path(directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(LOGGER_NAME)
-    logger.setLevel(_level(level))
+    chosen, rejected = _level(level)
+    logger.setLevel(chosen)
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
         handler.close()
@@ -76,13 +78,34 @@ def configure_logging(
         logging.getLevelName(logger.level),
         path,
     )
+    # CLAUDE CODE: reported once the handler exists, so the complaint is in the
+    # file the reader is about to open rather than on a discarded stderr.
+    if rejected is not None:
+        logger.warning(
+            "%s is set to %r, which is not a level name; using INFO. Valid values: %s",
+            LEVEL_VARIABLE,
+            rejected,
+            ", ".join(LEVEL_NAMES),
+        )
     return path
 
 
-def _level(level: int | str | None) -> int | str:
+def _level(level: int | str | None) -> tuple[int | str, str | None]:
+    """The level to use, and the environment value rejected to get there.
+
+    CLAUDE CODE: the variable is typed by a user who is already chasing a bug,
+    so a typo must not be what stops the app from starting. An explicit argument
+    comes from code and is left to fail on its own.
+    """
     if level is not None:
-        return level
-    return os.environ.get(LEVEL_VARIABLE, "INFO").upper()
+        return level, None
+    raw = os.environ.get(LEVEL_VARIABLE)
+    if raw is None:
+        return "INFO", None
+    name = raw.strip().upper()
+    if name not in LEVEL_NAMES:
+        return "INFO", raw
+    return name, None
 
 
 def _install_hooks(

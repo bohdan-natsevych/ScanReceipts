@@ -143,6 +143,10 @@ def require_opencv() -> None:
 
 
 class OpenCVSource(FrameSource):
+    # CLAUDE CODE: a webcam needs a moment after a mode change before the first
+    # frame arrives; this is long enough to tell a slow start from a refusal.
+    _FORMAT_PROBE_READS: ClassVar[int] = 10
+
     _PROPERTIES: ClassVar[dict[str, str]] = {
         "autofocus": "CAP_PROP_AUTOFOCUS",
         "focus": "CAP_PROP_FOCUS",
@@ -187,25 +191,66 @@ class OpenCVSource(FrameSource):
             self.settings.camera_height,
             self.settings.camera_fps,
         )
+        capture = self._attempt(backend, compressed=True)
+        if capture is None:
+            log.warning(
+                "%s did not deliver frames as MJPG, retrying with its default format",
+                self.descriptor.name,
+            )
+            capture = self._attempt(backend, compressed=False)
+        if capture is None:
+            log.error("Could not open %s", self.descriptor.name)
+            raise CameraError(f"Could not open {self.descriptor.name}")
+        self._capture = capture
+        self._opened_at = time.monotonic()
+        log.info(
+            "%s delivers %sx%s @ %s fps as %s",
+            self.descriptor.name,
+            capture.get(cv2.CAP_PROP_FRAME_WIDTH),
+            capture.get(cv2.CAP_PROP_FRAME_HEIGHT),
+            capture.get(cv2.CAP_PROP_FPS),
+            _fourcc_name(capture.get(cv2.CAP_PROP_FOURCC)),
+        )
+        self._apply_controls()
+
+    def _attempt(self, backend: int, compressed: bool) -> Any | None:
+        """Open the device once, or None when it will not hand over frames.
+
+        CLAUDE CODE: a USB webcam defaults to uncompressed YUY2, which at 1080p30
+        is around 124 MB/s - more than a USB 2.0 path can carry, so the driver
+        answers by collapsing the frame rate. Teams and Zoom look fine on the
+        same camera because they ask for MJPG. The format has to be set before
+        the resolution, or the driver has already chosen the mode.
+        """
         capture = cv2.VideoCapture(self.camera_index, backend)
         if not capture.isOpened():
             capture.release()
-            log.error("Could not open %s", self.descriptor.name)
-            raise CameraError(f"Could not open {self.descriptor.name}")
+            return None
+        if compressed and hasattr(cv2, "CAP_PROP_FOURCC"):
+            capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.settings.camera_width)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.settings.camera_height)
         capture.set(cv2.CAP_PROP_FPS, self.settings.camera_fps)
         if hasattr(cv2, "CAP_PROP_AUTOFOCUS"):
             capture.set(cv2.CAP_PROP_AUTOFOCUS, 1 if self.settings.autofocus else 0)
-        self._capture = capture
-        self._opened_at = time.monotonic()
-        log.info(
-            "%s delivers %sx%s",
-            self.descriptor.name,
-            capture.get(cv2.CAP_PROP_FRAME_WIDTH),
-            capture.get(cv2.CAP_PROP_FRAME_HEIGHT),
-        )
-        self._apply_controls()
+        if compressed and not self._delivers(capture):
+            capture.release()
+            return None
+        return capture
+
+    @staticmethod
+    def _delivers(capture: Any) -> bool:
+        """Whether the device actually produces a frame in the chosen format.
+
+        CLAUDE CODE: some devices accept the format and then hand back nothing -
+        a virtual camera especially - so accepting the property is not proof.
+        """
+        for _attempt in range(OpenCVSource._FORMAT_PROBE_READS):
+            ok, frame = capture.read()
+            if ok and frame is not None:
+                return True
+            time.sleep(0.05)
+        return False
 
     def _apply_controls(self) -> None:
         if self._capture is None:
@@ -363,6 +408,15 @@ class VideoFileSource(FrameSource):
             ),
             CameraCapability("fps", True, self._fps),
         ]
+
+
+def _fourcc_name(value: float) -> str:
+    """The four character code a device reports, as text."""
+    code = int(value)
+    if code <= 0:
+        return "unknown"
+    name = "".join(chr((code >> shift) & 0xFF) for shift in (0, 8, 16, 24))
+    return name if name.isprintable() else "unknown"
 
 
 def _backend_label(backend: int | None) -> str:

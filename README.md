@@ -60,6 +60,10 @@ uv run scan-receipts
 of the review and duplicate windows. The variable is read at startup, so it
 works on an installed build without a new release.
 
+Valid values are `DEBUG`, `INFO`, `WARNING`, `ERROR` and `CRITICAL`; case and
+surrounding spaces do not matter. Anything else falls back to `INFO` and says so
+in the log rather than stopping the app.
+
 Qt's own messages are logged too, under `scan_receipts.qt`. That matters because
 Qt ends the process itself for some conditions - a `QThread` destroyed while
 still running, for instance - by printing one line and calling `abort()`. No

@@ -227,3 +227,28 @@ def test_native_crashes_are_armed_with_the_fault_handler(
     finally:
         if not was_enabled:
             faulthandler.disable()
+
+
+def test_an_unusable_log_level_falls_back_instead_of_blocking_startup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
+    monkeypatch.setenv("SCANRECEIPTS_LOG_LEVEL", "VERBOSE")
+
+    log = configure_logging(tmp_path / "logs")
+
+    assert logging.getLogger("scan_receipts").level == logging.INFO
+    written = log.read_text(encoding="utf-8")
+    assert "VERBOSE" in written
+    assert "INFO" in written
+
+
+def test_a_log_level_is_read_whatever_its_case_or_spacing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
+    monkeypatch.setenv("SCANRECEIPTS_LOG_LEVEL", "  debug ")
+
+    configure_logging(tmp_path / "logs")
+
+    assert logging.getLogger("scan_receipts").level == logging.DEBUG

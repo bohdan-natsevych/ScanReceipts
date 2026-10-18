@@ -84,6 +84,10 @@ class AppSettings:
     camera_height: int = 1080
     camera_fps: int = 30
     camera_controls: dict[str, float] = field(default_factory=dict)
+    # CLAUDE CODE: what to do once a scene stays dark. "smooth" holds the frame
+    # rate (exposure capped at one frame period, gain raised); "auto" leaves the
+    # camera's own auto exposure alone, brighter but slower in dim rooms.
+    low_light_mode: str = "smooth"
     # CLAUDE CODE: "detect" straightens the receipt found in the drawn area;
     # "exact" keeps the drawn rectangle as it is. Enhancement runs either way.
     manual_capture_mode: str = "detect"

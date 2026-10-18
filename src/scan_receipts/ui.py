@@ -2892,6 +2892,12 @@ class SettingsPage(QWidget):
         self.exposure_lock.setChecked(settings.exposure_lock)
         self.white_balance_lock = QCheckBox()
         self.white_balance_lock.setChecked(settings.white_balance_lock)
+        self.low_light_mode = QComboBox()
+        self.low_light_mode.addItem("Smooth video (raise gain, keep frame rate)", "smooth")
+        self.low_light_mode.addItem("Camera auto (brighter, may stutter)", "auto")
+        self.low_light_mode.setCurrentIndex(
+            max(0, self.low_light_mode.findData(settings.low_light_mode))
+        )
         self.combine_maximum = QSpinBox()
         self.combine_maximum.setRange(2, 16)
         self.combine_maximum.setValue(settings.combine_maximum)
@@ -2964,6 +2970,7 @@ class SettingsPage(QWidget):
             ("One-shot autofocus then lock", self.focus_lock),
             ("Lock exposure", self.exposure_lock),
             ("Lock white balance", self.white_balance_lock),
+            ("In low light", self.low_light_mode),
             ("Maximum receipts per combined capture", self.combine_maximum),
             ("Diagnostics overlay", self.overlay),
             ("Analysis buffer", self.buffer),
@@ -3020,6 +3027,7 @@ class SettingsPage(QWidget):
         values.focus_lock = self.focus_lock.isChecked()
         values.exposure_lock = self.exposure_lock.isChecked()
         values.white_balance_lock = self.white_balance_lock.isChecked()
+        values.low_light_mode = self.low_light_mode.currentData()
         values.combine_maximum = self.combine_maximum.value()
         values.debug_overlay = self.overlay.isChecked()
         values.detection.buffer_seconds = self.buffer.value()

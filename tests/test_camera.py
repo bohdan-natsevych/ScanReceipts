@@ -3,25 +3,9 @@ import numpy as np
 from scan_receipts.camera import (
     DEVICE_LOCK,
     OpenCVSource,
-    _parse_dshow_device_names,
     enumerate_cameras,
 )
 from scan_receipts.config import default_settings
-
-
-def test_directshow_names_are_parsed_without_alternative_ids() -> None:
-    output = """
-[dshow @ 0001] "Integrated Camera" (video)
-[dshow @ 0001]   Alternative name "@device_pnp_..."
-[dshow @ 0001] "My Phone (Windows Virtual Camera)" (video)
-[dshow @ 0001] "Microphone Array" (audio)
-"""
-
-    assert _parse_dshow_device_names(output) == [
-        "Integrated Camera",
-        "My Phone (Windows Virtual Camera)",
-    ]
-
 
 MJPG = 1196444237  # cv2.VideoWriter_fourcc(*"MJPG")
 
@@ -93,7 +77,8 @@ def camera_source(monkeypatch, *, mjpg_delivers: bool = True):
     return OpenCVSource(0, settings, name="Test camera"), fake
 
 
-def test_a_usb_camera_is_asked_for_mjpg_before_its_resolution(monkeypatch) -> None:
+def test_a_usb_camera_is_asked_for_mjpg_after_its_resolution(monkeypatch) -> None:
+    """DirectShow renegotiated YUY2 on any later size or fps change."""
     source, fake = camera_source(monkeypatch)
 
     source.open()
@@ -102,9 +87,13 @@ def test_a_usb_camera_is_asked_for_mjpg_before_its_resolution(monkeypatch) -> No
     order = [prop for prop, _value in capture.calls]
     assert FakeCv2.CAP_PROP_FOURCC in order, "MJPG must be requested"
     assert capture.props[FakeCv2.CAP_PROP_FOURCC] == MJPG
-    assert order.index(FakeCv2.CAP_PROP_FOURCC) < order.index(
-        FakeCv2.CAP_PROP_FRAME_WIDTH
-    ), "the format must be negotiated before the resolution"
+    fourcc = order.index(FakeCv2.CAP_PROP_FOURCC)
+    for prop in (
+        FakeCv2.CAP_PROP_FRAME_WIDTH,
+        FakeCv2.CAP_PROP_FRAME_HEIGHT,
+        FakeCv2.CAP_PROP_FPS,
+    ):
+        assert order.index(prop) < fourcc, "the format must be requested last"
 
 
 def test_opening_a_camera_never_reads_a_frame(monkeypatch) -> None:

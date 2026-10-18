@@ -470,11 +470,15 @@ class CaptureWorker(QObject):
                 # CURSOR: only judge brightness after the settler has locked, so
                 # auto-exposure convergence is never mistaken for a dark scene.
                 if not self.source.is_replay and low_light_monitor.observe(packet):
-                    self.source.boost_low_light()
-                    self.low_light.emit(
-                        "Scene is dark - exposure raised. "
-                        "Add light if captures stay dim."
-                    )
+                    if self.source.boost_low_light():
+                        self.low_light.emit(
+                            "Scene is dark - camera gain raised. "
+                            "Add light if captures stay dim."
+                        )
+                    else:
+                        self.low_light.emit(
+                            "Scene is dark - add light if captures stay dim."
+                        )
                 packet = FramePacket(
                     packet.timestamp, packet.frame, index=self._frame_index
                 )

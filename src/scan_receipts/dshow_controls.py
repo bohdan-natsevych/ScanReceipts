@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterator
 from ctypes import POINTER, byref, c_int, c_long, c_ulong, c_ulonglong, c_void_p, cast
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar
@@ -16,7 +17,7 @@ except (ImportError, OSError):  # pragma: no cover - non-Windows or missing pack
     comtypes = None  # type: ignore[assignment]
 
 CONTROL_NAMES = ("brightness", "contrast", "white_balance", "zoom", "exposure", "focus")
-_VIDEO_PROC_AMP = {"brightness": 0, "contrast": 1, "white_balance": 7}
+_VIDEO_PROC_AMP = {"brightness": 0, "contrast": 1, "white_balance": 7, "gain": 9}
 _CAMERA_CONTROL = {"zoom": 3, "exposure": 4, "focus": 6}
 _FLAG_AUTO = 0x1
 
@@ -165,10 +166,8 @@ def _read_ranges(interface: Any, mapping: dict[str, int]) -> dict[str, ControlRa
     return found
 
 
-def control_ranges(device_name: str) -> dict[str, ControlRange]:
-    """Real min/max/step/auto capability per control, or {} when unavailable."""
-    if comtypes is None:
-        return {}
+@contextlib.contextmanager
+def _com_apartment() -> Iterator[None]:
     initialized = False
     try:
         comtypes.CoInitialize()
@@ -178,7 +177,7 @@ def control_ranges(device_name: str) -> dict[str, ControlRange]:
         # below still work there, and it is not ours to uninitialize.
         pass
     try:
-        return _device_control_ranges(device_name)
+        yield
     finally:
         # CURSOR: every successful init needs its own uninit, and only after
         # the interface pointers of the inner call have been released.
@@ -187,24 +186,55 @@ def control_ranges(device_name: str) -> dict[str, ControlRange]:
                 comtypes.CoUninitialize()
 
 
+def _video_input_monikers() -> Iterator[Any]:
+    """DirectShow video inputs, in the order OpenCV's CAP_DSHOW indexes them."""
+    enum = comtypes.CoCreateInstance(
+        CLSID_SystemDeviceEnum,
+        interface=ICreateDevEnum,
+        clsctx=comtypes.CLSCTX_INPROC_SERVER,
+    )
+    class_enum = enum.CreateClassEnumerator(byref(CLSID_VideoInputDeviceCategory), 0)
+    # CLAUDE CODE: an empty category returns S_FALSE and a null enumerator.
+    if not class_enum:
+        return
+    while True:
+        moniker, fetched = class_enum.Next(1)
+        if not fetched or not moniker:
+            return
+        yield moniker
+
+
+def video_input_names() -> list[str]:
+    """Friendly names of the cameras, indexed like OpenCV's CAP_DSHOW."""
+    if comtypes is None:
+        return []
+    with _com_apartment():
+        try:
+            return [_friendly_name(moniker) for moniker in _video_input_monikers()]
+        except Exception:
+            return []
+
+
+def control_ranges(device_name: str) -> dict[str, ControlRange]:
+    """Real min/max/step/auto capability per control, or {} when unavailable."""
+    if comtypes is None:
+        return {}
+    with _com_apartment():
+        return _device_control_ranges(device_name)
+
+
 def _device_control_ranges(device_name: str) -> dict[str, ControlRange]:
     try:
-        enum = comtypes.CoCreateInstance(
-            CLSID_SystemDeviceEnum,
-            interface=ICreateDevEnum,
-            clsctx=comtypes.CLSCTX_INPROC_SERVER,
+        moniker = next(
+            (
+                found
+                for found in _video_input_monikers()
+                if _friendly_name(found) == device_name
+            ),
+            None,
         )
-        class_enum = enum.CreateClassEnumerator(
-            byref(CLSID_VideoInputDeviceCategory), 0
-        )
-        if not class_enum:
+        if moniker is None:
             return {}
-        while True:
-            moniker, fetched = class_enum.Next(1)
-            if not fetched or not moniker:
-                return {}
-            if _friendly_name(moniker) == device_name:
-                break
         pointer = moniker.BindToObject(None, None, byref(IID_IBaseFilter))
         unknown = cast(pointer, POINTER(IUnknown))
         ranges: dict[str, ControlRange] = {}
@@ -225,9 +255,11 @@ def _friendly_name(moniker: Any) -> str:
     try:
         pointer = moniker.BindToStorage(None, None, byref(IPropertyBag._iid_))
         bag = cast(pointer, POINTER(IPropertyBag))
-        variant = VARIANT()
-        bag.Read("FriendlyName", byref(variant), None)
-        return str(variant.value)
+        # CLAUDE CODE: comtypes declares pVar as [in, out], so it takes the
+        # VARIANT itself and returns the value read. Passing byref(variant)
+        # fails with E_INVALIDARG, which left every name empty and every
+        # control lookup by name silently finding nothing.
+        return str(bag.Read("FriendlyName", VARIANT(), None))
     except Exception:
         return ""
 

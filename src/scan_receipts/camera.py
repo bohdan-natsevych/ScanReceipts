@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -21,6 +22,14 @@ except (
 from .models import AppSettings, CameraCapability, CameraDescriptor, FramePacket
 
 log = logging.getLogger(__name__)
+
+# CLAUDE CODE: creating, configuring and releasing a VideoCapture is not safe
+# while another thread does the same - even on a different index. Media
+# Foundation then corrupts the heap (0xc0000374) or faults inside OpenCV, which
+# is how a preview closing on one thread and enumeration on the GUI thread took
+# the process down. Every device open, release and probe goes through this lock.
+# Reading frames does not: each source reads only from its own handle.
+DEVICE_LOCK = threading.Lock()
 
 
 class CameraError(RuntimeError):
@@ -176,6 +185,10 @@ class OpenCVSource(FrameSource):
 
     def open(self) -> None:
         require_opencv()
+        with DEVICE_LOCK:
+            self._open_device()
+
+    def _open_device(self) -> None:
         backend = self.backend
         if backend is None:
             backend = cv2.CAP_MSMF if hasattr(cv2, "CAP_MSMF") else cv2.CAP_ANY
@@ -293,7 +306,8 @@ class OpenCVSource(FrameSource):
     def close(self) -> None:
         if self._capture is not None:
             log.info("Closing %s", self.descriptor.name)
-            self._capture.release()
+            with DEVICE_LOCK:
+                self._capture.release()
             self._capture = None
 
     @property
@@ -479,9 +493,10 @@ def enumerate_cameras(
     try:
         for index in range(maximum):
             for backend in dict.fromkeys(backends):
-                capture = cv2.VideoCapture(index, backend)
-                opened = capture.isOpened()
-                capture.release()
+                with DEVICE_LOCK:
+                    capture = cv2.VideoCapture(index, backend)
+                    opened = capture.isOpened()
+                    capture.release()
                 if opened:
                     found.append(
                         CameraDescriptor(

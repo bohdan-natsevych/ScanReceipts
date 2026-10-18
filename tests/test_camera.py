@@ -1,6 +1,11 @@
 import numpy as np
 
-from scan_receipts.camera import OpenCVSource, _parse_dshow_device_names
+from scan_receipts.camera import (
+    DEVICE_LOCK,
+    OpenCVSource,
+    _parse_dshow_device_names,
+    enumerate_cameras,
+)
 from scan_receipts.config import default_settings
 
 
@@ -139,3 +144,33 @@ def test_a_driver_that_rejects_the_format_does_not_lose_the_camera(monkeypatch) 
     capture = fake.opened[0]
     assert not capture.released, "a refused format must not cost us the camera"
     assert capture.props[FakeCv2.CAP_PROP_FRAME_WIDTH] == 1920
+
+
+def test_every_device_open_release_and_probe_holds_the_device_lock(
+    monkeypatch,
+) -> None:
+    """Concurrent open/release on two threads corrupted the heap inside MSMF."""
+    source, fake = camera_source(monkeypatch)
+    held: list[tuple[str, bool]] = []
+    original_capture = fake.VideoCapture
+    original_release = FakeCapture.release
+
+    def tracked_capture(index, backend=None):
+        held.append(("open", DEVICE_LOCK.locked()))
+        return original_capture(index, backend)
+
+    def tracked_release(self):
+        held.append(("release", DEVICE_LOCK.locked()))
+        original_release(self)
+
+    monkeypatch.setattr(fake, "VideoCapture", tracked_capture)
+    monkeypatch.setattr(FakeCapture, "release", tracked_release)
+    monkeypatch.setattr("scan_receipts.camera.windows_camera_names", lambda: [])
+
+    source.open()
+    source.close()
+    enumerate_cameras(default_settings(), maximum=1)
+
+    assert [kind for kind, _ in held] == ["open", "release", "open", "release"]
+    assert all(locked for _, locked in held), held
+    assert not DEVICE_LOCK.locked()

@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-import subprocess
+import math
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -64,8 +63,9 @@ class FrameSource(ABC):
     def lock_after_settle(self) -> None:  # noqa: B027
         """Lock auto controls once the scene has settled; default no-op."""
 
-    def boost_low_light(self) -> None:  # noqa: B027
-        """Raise exposure on a persistently dark scene; default no-op."""
+    def boost_low_light(self) -> bool:
+        """Respond to a persistently dark scene. True when the camera was changed."""
+        return False
 
 
 class SceneSettler:
@@ -226,11 +226,12 @@ class OpenCVSource(FrameSource):
     def _attempt(self, backend: int, compressed: bool) -> Any | None:
         """Open the device once, or None when it will not open at all.
 
-        CLAUDE CODE: a USB webcam defaults to uncompressed YUY2, which at 1080p30
-        is around 124 MB/s - more than a USB 2.0 path can carry, so the driver
-        answers by collapsing the frame rate. Teams and Zoom look fine on the
-        same camera because they ask for MJPG. The format has to be set before
-        the resolution, or the driver has already chosen the mode.
+        CLAUDE CODE: a USB webcam defaults to uncompressed YUY2, whose 1080p mode
+        often runs at 3 fps (USB 2.0 cannot carry more), while its MJPG mode does
+        30. Teams and Zoom look fine on the same camera because they ask for MJPG.
+        OpenCV's DirectShow backend renegotiates the format on every width,
+        height or fps change, so MJPG has to be requested last: requested first,
+        it was silently replaced by YUY2 at 2.7 fps on an EC1 Ultra webcam.
 
         Nothing is read here. Probing with read() during open cost an access
         violation inside OpenCV, and a device that takes the format and then
@@ -244,6 +245,9 @@ class OpenCVSource(FrameSource):
         if not capture.isOpened():
             capture.release()
             return None
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.settings.camera_width)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.settings.camera_height)
+        capture.set(cv2.CAP_PROP_FPS, self.settings.camera_fps)
         if compressed and hasattr(cv2, "CAP_PROP_FOURCC"):
             try:
                 capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
@@ -257,9 +261,6 @@ class OpenCVSource(FrameSource):
                     self.descriptor.name,
                     exc_info=True,
                 )
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.settings.camera_width)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.settings.camera_height)
-        capture.set(cv2.CAP_PROP_FPS, self.settings.camera_fps)
         if hasattr(cv2, "CAP_PROP_AUTOFOCUS"):
             capture.set(cv2.CAP_PROP_AUTOFOCUS, 1 if self.settings.autofocus else 0)
         return capture
@@ -283,9 +284,16 @@ class OpenCVSource(FrameSource):
         if self.settings.white_balance_lock and hasattr(cv2, "CAP_PROP_AUTO_WB"):
             self._capture.set(cv2.CAP_PROP_AUTO_WB, 0)
 
-    def boost_low_light(self) -> None:
+    def boost_low_light(self) -> bool:
         if self._capture is None:
-            return
+            return False
+        if self.settings.low_light_mode != "smooth":
+            log.info(
+                "%s scene is dark; low-light mode is %r, so auto exposure is kept",
+                self.descriptor.name,
+                self.settings.low_light_mode,
+            )
+            return False
         try:
             from .dshow_controls import control_ranges
 
@@ -293,14 +301,37 @@ class OpenCVSource(FrameSource):
         except Exception:
             log.debug("DirectShow control ranges unavailable", exc_info=True)
             ranges = {}
+        # CLAUDE CODE: smoothness wins over brightness. An exposure longer than
+        # one frame period caps the frame rate (an EC1 webcam fell to 15 fps on
+        # auto in a dim room), so exposure is set to the longest that still fits
+        # a frame and the brightness is made up with gain, which costs noise
+        # instead. The driver's "current" exposure is not used: while auto is on
+        # it reports a stale value, and stepping up from it made frames darker.
+        fps = self._reported_fps or self.settings.camera_fps
         exposure = ranges.get("exposure")
-        if exposure is not None and hasattr(cv2, "CAP_PROP_EXPOSURE"):
-            target = min(exposure.maximum, exposure.current + 2 * max(1, exposure.step))
+        if exposure is not None:
+            target = min(exposure.maximum, _exposure_ceiling(fps))
             self._capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
             self._capture.set(cv2.CAP_PROP_EXPOSURE, float(target))
-        elif hasattr(cv2, "CAP_PROP_EXPOSURE"):
-            current = self._capture.get(cv2.CAP_PROP_EXPOSURE)
-            self._capture.set(cv2.CAP_PROP_EXPOSURE, current + 1)
+            log.info(
+                "%s exposure fixed at %s, the longest that keeps %.0f fps",
+                self.descriptor.name,
+                target,
+                fps,
+            )
+        gain = ranges.get("gain")
+        if gain is not None and gain.maximum > gain.current:
+            self._capture.set(cv2.CAP_PROP_GAIN, float(gain.maximum))
+            log.info(
+                "%s gain %s -> %s", self.descriptor.name, gain.current, gain.maximum
+            )
+        if exposure is None and gain is None:
+            log.info(
+                "%s exposes no exposure or gain control; low light left as is",
+                self.descriptor.name,
+            )
+            return False
+        return True
 
     def read(self) -> FramePacket | None:
         if self._capture is None:
@@ -451,6 +482,14 @@ class VideoFileSource(FrameSource):
         ]
 
 
+def _exposure_ceiling(fps: float) -> int:
+    """Longest exposure that still fits one frame at `fps`.
+
+    DirectShow exposure is log2 seconds: -5 is 1/32 s, short enough for 30 fps.
+    """
+    return math.floor(math.log2(1.0 / max(1.0, fps)))
+
+
 class FrameRateMeter:
     """Counts the frames a source actually delivers."""
 
@@ -508,40 +547,14 @@ def _backend_label(backend: int | None) -> str:
     return labels.get(backend, f"Backend {backend}")
 
 
-def _parse_dshow_device_names(output: str) -> list[str]:
-    names = []
-    for line in output.splitlines():
-        match = re.search(r'"([^"]+)" \(video\)\s*$', line.strip())
-        if match:
-            names.append(match.group(1))
-    return names
-
-
 def windows_camera_names() -> list[str]:
-    """Return DirectShow display names when FFmpeg is available."""
-    try:
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-list_devices",
-                "true",
-                "-f",
-                "dshow",
-                "-i",
-                "dummy",
-            ],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=8,
-            check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        return _parse_dshow_device_names(result.stdout + "\n" + result.stderr)
-    except (OSError, subprocess.SubprocessError):
-        log.warning("Could not enumerate DirectShow devices", exc_info=True)
-        return []
+    """DirectShow display names, indexed like OpenCV's CAP_DSHOW."""
+    from .dshow_controls import video_input_names
+
+    names = video_input_names()
+    if not names:
+        log.warning("Could not read DirectShow camera names")
+    return names
 
 
 def enumerate_cameras(

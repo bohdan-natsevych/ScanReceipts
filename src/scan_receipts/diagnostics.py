@@ -7,6 +7,7 @@ import sys
 import threading
 import traceback
 from collections.abc import Callable
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import TracebackType
@@ -73,8 +74,9 @@ def configure_logging(
     _install_hooks(logger, notify)
     _arm_fault_handler(fault_path(directory))
     logger.info(
-        "Scan Receipts %s started, logging at %s to %s",
+        "Scan Receipts %s started (pid %s), logging at %s to %s",
         APP_VERSION,
+        os.getpid(),
         logging.getLevelName(logger.level),
         path,
     )
@@ -168,5 +170,10 @@ def _arm_fault_handler(path: Path) -> None:
     if _fault_file is not None:
         _fault_file.close()
     _fault_file = path.open("a", encoding="utf-8", buffering=1)
-    _fault_file.write(f"--- run started, Scan Receipts {APP_VERSION} ---\n")
+    # CLAUDE CODE: the C handler cannot timestamp what it writes, so this header
+    # is the only link between a fault and the main log's run with the same pid.
+    _fault_file.write(
+        f"--- run started {datetime.now().astimezone().isoformat(sep=' ', timespec='seconds')}, "
+        f"Scan Receipts {APP_VERSION}, pid {os.getpid()} ---\n"
+    )
     faulthandler.enable(file=_fault_file, all_threads=True)

@@ -39,7 +39,7 @@ from scan_receipts.diagnostics import (
     configure_logging,
     install_qt_message_handler,
 )
-from scan_receipts.models import CameraDescriptor, CaptureCandidate
+from scan_receipts.models import CameraDescriptor, CaptureCandidate, FramePacket
 from scan_receipts.processing import ReceiptProcessor
 from scan_receipts.ui import (
     DuplicateDeckDialog,
@@ -1099,11 +1099,7 @@ def test_a_preview_that_will_not_stop_blocks_a_second_one(
     qtbot, tmp_path: Path, monkeypatch
 ) -> None:
     page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
-    stuck = SimpleNamespace(
-        isRunning=lambda: True, quit=lambda: None, wait=lambda _ms: False
-    )
-    page._preview_worker = SimpleNamespace(stop=lambda: None)
-    page._preview_thread = stuck
+    page._preview_worker = SimpleNamespace(stop=lambda: None, is_alive=lambda: True)
     monkeypatch.setattr(ScanPage, "_selected_source", lambda self: SimpleNamespace())
     made: list[str] = []
     monkeypatch.setattr(
@@ -1199,12 +1195,11 @@ def test_stopping_a_preview_does_not_block_the_gui_thread(
     qtbot, tmp_path: Path, monkeypatch
 ) -> None:
     page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
-    waits: list[int] = []
-    page._preview_worker = SimpleNamespace(stop=lambda: None)
-    page._preview_thread = SimpleNamespace(
-        isRunning=lambda: True,
-        quit=lambda: None,
-        wait=lambda ms: waits.append(ms) or True,
+    waits: list[float] = []
+    page._preview_worker = SimpleNamespace(
+        stop=lambda: None,
+        is_alive=lambda: True,
+        join=lambda timeout: waits.append(timeout) or True,
     )
 
     free = page.stop_source_preview()
@@ -1217,13 +1212,14 @@ def test_the_camera_is_free_again_once_the_preview_thread_finishes(
     qtbot, tmp_path: Path, monkeypatch
 ) -> None:
     page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
-    thread = SimpleNamespace(isRunning=lambda: True, quit=lambda: None)
-    page._preview_worker = SimpleNamespace(stop=lambda: None)
-    page._preview_thread = thread
+    alive = [True]
+    page._preview_worker = SimpleNamespace(stop=lambda: None, is_alive=lambda: alive[0])
     assert page.stop_source_preview() is False
 
-    page._preview_finished(thread)
+    alive[0] = False
+    page._preview_finished()
 
+    assert page._preview_worker is None
     assert page.stop_source_preview() is True
 
 
@@ -1263,6 +1259,109 @@ def test_a_preview_retry_gives_up_instead_of_spinning(
     page.start_source_preview()
 
     assert not scheduled, "a preview that never frees the camera must stop retrying"
+
+
+class StreamingSource(RecordingSource):
+    """A camera that keeps delivering frames until it is closed."""
+
+    def read(self):
+        time.sleep(0.01)
+        return FramePacket(time.monotonic(), np.zeros((4, 4, 3), np.uint8))
+
+
+def test_shutdown_waits_for_a_streaming_preview_to_end(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """Destroying the window while the preview thread ran made Qt abort."""
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    qtbot.wait(20)
+    source = StreamingSource()
+    monkeypatch.setattr(ScanPage, "_selected_source", lambda self: source)
+    page.start_source_preview()
+    worker = page._preview_worker
+    qtbot.waitUntil(lambda: source.opened)
+
+    page.shutdown()
+
+    assert not worker.is_alive(), "the preview must be over before teardown"
+    assert source.closed
+    assert page._preview_worker is None
+
+
+def test_shutdown_returns_even_when_the_preview_will_not_stop(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """A driver stuck in open() must not hang the exit or abort it."""
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    calls: list[str] = []
+    page._preview_worker = SimpleNamespace(
+        stop=lambda: calls.append("stop"),
+        join=lambda timeout: calls.append("join") or False,
+    )
+
+    page.shutdown()
+
+    assert calls == ["stop", "join"]
+    assert page._preview_worker is None
+
+
+def test_refreshing_sources_waits_until_the_preview_releases_the_camera(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """Enumerating while the preview closed its camera corrupted the heap."""
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    qtbot.wait(20)
+    enumerated: list[str] = []
+    monkeypatch.setattr(
+        "scan_receipts.ui.enumerate_cameras",
+        lambda _settings: enumerated.append("probe") or [],
+    )
+    monkeypatch.setattr(ScanPage, "stop_source_preview", lambda self: False)
+
+    page.refresh_sources()
+
+    assert not enumerated, "cameras must not be probed while the preview holds one"
+    monkeypatch.setattr(ScanPage, "stop_source_preview", lambda self: True)
+    qtbot.waitUntil(lambda: bool(enumerated), timeout=2000)
+
+
+def test_refreshing_sources_gives_up_on_a_preview_that_never_releases(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    page, _repository, _session = scanning_page(qtbot, tmp_path, monkeypatch)
+    qtbot.wait(20)
+    enumerated: list[str] = []
+    monkeypatch.setattr(
+        "scan_receipts.ui.enumerate_cameras",
+        lambda _settings: enumerated.append("probe") or [],
+    )
+    monkeypatch.setattr(ScanPage, "stop_source_preview", lambda self: False)
+    page._preview_release_deadline = time.monotonic() - 1
+
+    page.refresh_sources()
+    qtbot.wait(300)
+
+    assert not enumerated
+    assert "still in use" in page.diagnostics.text()
+
+
+def test_quitting_the_application_stops_the_scan_page_threads(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """QApplication.quit() skips closeEvent, so it must reach shutdown too."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr("scan_receipts.ui.enumerate_cameras", lambda _settings: [])
+    stopped: list[str] = []
+    monkeypatch.setattr(ScanPage, "shutdown", lambda self: stopped.append("shutdown"))
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    QApplication.instance().aboutToQuit.emit()
+
+    assert stopped == ["shutdown"]
+
+
 def test_rebuilding_a_deck_destroys_each_card_exactly_once(
     qtbot, tmp_path: Path, monkeypatch
 ) -> None:

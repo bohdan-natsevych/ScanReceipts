@@ -94,6 +94,7 @@ from .version import APP_VERSION
 from .workers import SourcePreviewWorker, UpdateWorker
 
 log = logging.getLogger(__name__)
+_ABANDONED_PREVIEWS: list[SourcePreviewWorker] = []
 
 
 def reveal(path: str | Path) -> None:
@@ -894,6 +895,7 @@ class CaptureStrip(QListWidget):
 class ScanPage(QWidget):
     SOURCE_COMBO_WIDTH = 320
     PREVIEW_RELEASE_SECONDS = 5.0
+    THREAD_SHUTDOWN_SECONDS = 10.0
     capabilities_ready = Signal(object)
     settings_changed = Signal()
     request_download = Signal(object)
@@ -910,7 +912,6 @@ class ScanPage(QWidget):
         self._video_path: Path | None = None
         self._resume_session_id: str | None = None
         self._session_folder: Path | None = None
-        self._preview_thread: QThread | None = None
         self._preview_worker: SourcePreviewWorker | None = None
         self._preview_pending = False
         self._preview_release_deadline: float | None = None
@@ -1060,7 +1061,17 @@ class ScanPage(QWidget):
         QTimer.singleShot(0, self.refresh_sources)
 
     def refresh_sources(self) -> None:
-        self.stop_source_preview()
+        # CLAUDE CODE: enumeration opens and releases every camera index, so it
+        # must not start until the preview has closed its device.
+        released = self._await_preview_release(self.refresh_sources, 250)
+        if released is None:
+            return
+        if not released:
+            log.error("The preview never released the camera; sources not refreshed")
+            self.diagnostics.setText(
+                "Could not refresh sources: the camera is still in use"
+            )
+            return
         self.source_combo.blockSignals(True)
         self.source_combo.clear()
         self._sources = enumerate_cameras(self.settings)
@@ -1160,45 +1171,30 @@ class ScanPage(QWidget):
         if self.controller.active:
             return
         self._preview_packets.clear()
-        if not self.stop_source_preview():
-            # CLAUDE CODE: the old worker still holds the device. Opening it
-            # again from here is the concurrent open that crashes, so wait for it
-            # - bounded, because a wedged worker would otherwise have this
-            # retrying and logging every half second for the rest of the run.
-            if self._preview_release_deadline is None:
-                self._preview_release_deadline = (
-                    time.monotonic() + self.PREVIEW_RELEASE_SECONDS
-                )
-            if time.monotonic() < self._preview_release_deadline:
-                log.debug("Preview source is still closing; trying again shortly")
-                QTimer.singleShot(500, self._schedule_preview)
-                return
+        released = self._await_preview_release(self._schedule_preview, 500)
+        if released is None:
+            return
+        if not released:
             log.warning("Preview source never released the camera; giving up")
             self.diagnostics.setText("Preview unavailable: the camera is still in use")
             return
-        self._preview_release_deadline = None
         source = self._selected_source()
         if source is None:
             return
+        # CLAUDE CODE: deliberately unparented. Reparenting this Python-created
+        # object to the page left Qt and PySide both believing they owned it,
+        # and deleting the page then crashed inside QObject::deleteChildren.
         worker = SourcePreviewWorker(source)
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
         worker.preview_ready.connect(self.preview.set_image)
         worker.packet_ready.connect(self._remember_preview_packet)
         worker.opened.connect(self._preview_opened)
         worker.failed.connect(
             lambda message: self.diagnostics.setText(f"Preview unavailable: {message}")
         )
-        worker.finished.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(
-            lambda preview_thread=thread: self._preview_finished(preview_thread)
-        )
-        thread.finished.connect(thread.deleteLater)
+        worker.finished.connect(self._preview_finished)
+        worker.finished.connect(worker.deleteLater)
         self._preview_worker = worker
-        self._preview_thread = thread
-        thread.start()
+        worker.start()
 
     def _remember_preview_packet(self, packet: FramePacket) -> None:
         self._preview_packets.append(
@@ -1208,11 +1204,13 @@ class ScanPage(QWidget):
         while self._preview_packets and self._preview_packets[0].timestamp < cutoff:
             self._preview_packets.popleft()
 
-    def _preview_finished(self, thread: QThread) -> None:
-        if self._preview_thread is thread:
+    def _preview_finished(self) -> None:
+        # CLAUDE CODE: a newer preview may already be current; only one that has
+        # ended is cleared.
+        worker = self._preview_worker
+        if worker is not None and not worker.is_alive():
             log.debug("Preview thread finished; the camera is free")
             self._preview_worker = None
-            self._preview_thread = None
 
     def _preview_opened(self, capabilities: list) -> None:
         values = {item.name: item.value for item in capabilities}
@@ -1230,19 +1228,60 @@ class ScanPage(QWidget):
         CLAUDE CODE: this never waits. Blocking the GUI thread on a worker that
         is three seconds deep inside a webcam open froze the window and timed
         out anyway, leaving the device held. The worker closes its own source on
-        the way out and _preview_finished clears these fields, so the honest
-        answer here is simply whether that has happened yet.
+        the way out, so the honest answer here is simply whether that has
+        happened yet.
         """
-        worker, thread = self._preview_worker, self._preview_thread
-        if worker is not None:
-            worker.stop()
-        if thread is None or not thread.isRunning():
-            self._preview_worker = None
-            self._preview_thread = None
+        worker = self._preview_worker
+        if worker is None:
             return True
-        thread.quit()
-        log.debug("Preview is still closing; the camera is not free yet")
+        worker.stop()
+        if worker.is_alive():
+            log.debug("Preview is still closing; the camera is not free yet")
+            return False
+        self._preview_worker = None
+        return True
+
+    def _await_preview_release(
+        self, retry: Callable[[], None], interval_ms: int
+    ) -> bool | None:
+        """True once the preview has let the camera go, None while `retry` is
+        scheduled to ask again, False once the wait has been given up.
+
+        CLAUDE CODE: the wait is bounded and shared by every caller, because a
+        wedged worker would otherwise have each of them retrying for the rest of
+        the run.
+        """
+        if self.stop_source_preview():
+            self._preview_release_deadline = None
+            return True
+        if self._preview_release_deadline is None:
+            self._preview_release_deadline = (
+                time.monotonic() + self.PREVIEW_RELEASE_SECONDS
+            )
+        if time.monotonic() < self._preview_release_deadline:
+            log.debug("Waiting for the preview to release the camera")
+            QTimer.singleShot(interval_ms, retry)
+            return None
+        self._preview_release_deadline = None
         return False
+
+    def _join_update_thread(self, thread: QThread) -> None:
+        """Wait for the update thread to end before its QThread is destroyed.
+
+        CLAUDE CODE: destroying a QThread that still runs makes Qt abort the
+        process. terminate() is the last resort for a download that will not
+        end, acceptable only because the process is exiting and an unfinished
+        installer download is simply discarded.
+        """
+        thread.quit()
+        if thread.wait(int(self.THREAD_SHUTDOWN_SECONDS * 1000)):
+            return
+        log.error(
+            "Update thread did not stop within %ss; terminating it",
+            self.THREAD_SHUTDOWN_SECONDS,
+        )
+        thread.terminate()
+        thread.wait()
 
     def check_for_updates(self) -> None:
         if self._update_thread is not None:
@@ -1342,20 +1381,10 @@ class ScanPage(QWidget):
                 self.choose_video()
             if self._video_path is None:
                 return
-        if not self.stop_source_preview():
-            # CLAUDE CODE: opening the camera for a session while the preview
-            # still has it is the concurrent open that crashes inside OpenCV, so
-            # this waits rather than forcing it - but it gives up out loud, and
-            # never spins here forever.
-            if self._preview_release_deadline is None:
-                self._preview_release_deadline = (
-                    time.monotonic() + self.PREVIEW_RELEASE_SECONDS
-                )
-            if time.monotonic() < self._preview_release_deadline:
-                log.info("Waiting for the preview to release the camera")
-                QTimer.singleShot(250, self.start)
-                return
-            self._preview_release_deadline = None
+        released = self._await_preview_release(self.start, 250)
+        if released is None:
+            return
+        if not released:
             log.error("The preview never released the camera; refusing to start")
             QMessageBox.critical(
                 self,
@@ -1364,7 +1393,6 @@ class ScanPage(QWidget):
                 "source, or restart the application.",
             )
             return
-        self._preview_release_deadline = None
         source = self._selected_source()
         if source is None:
             return
@@ -1442,7 +1470,7 @@ class ScanPage(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         log.debug("Scan tab shown")
-        if not self.controller.active and self._preview_thread is None:
+        if not self.controller.active and self._preview_worker is None:
             self._schedule_preview()
 
     def hideEvent(self, event) -> None:  # noqa: N802
@@ -1553,8 +1581,28 @@ class ScanPage(QWidget):
         self.start_button.setText("Resume This Session")
 
     def shutdown(self) -> None:
+        """Stop every worker thread this page owns. Safe to call more than once."""
         self.close_capture_dialog()
-        self.stop_source_preview()
+        worker = self._preview_worker
+        self._preview_worker = None
+        if worker is not None:
+            worker.stop()
+            # CLAUDE CODE: normally this returns within one frame. A driver stuck
+            # inside open() is left behind: the thread is a daemon, so it cannot
+            # keep the process alive, and no Qt object depends on it ending.
+            if not worker.join(self.THREAD_SHUTDOWN_SECONDS):
+                log.error(
+                    "Preview did not release the camera within %ss; exiting anyway",
+                    self.THREAD_SHUTDOWN_SECONDS,
+                )
+                # CLAUDE CODE: held so the stuck thread never drops the last
+                # reference and destroys a GUI-thread QObject from its own thread.
+                _ABANDONED_PREVIEWS.append(worker)
+        update_thread = self._update_thread
+        self._update_worker = None
+        self._update_thread = None
+        if update_thread is not None:
+            self._join_update_thread(update_thread)
 
 
 def _readable_size(size: int) -> str:
@@ -3061,6 +3109,11 @@ class MainWindow(QMainWindow):
             lambda: self.store.save(self.settings)
         )
         self.scan_page.capabilities_ready.connect(self.settings_page.apply_capabilities)
+        # CLAUDE CODE: QApplication.quit() (the installer hand-off) never sends a
+        # closeEvent, so the threads are also stopped here.
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.scan_page.shutdown)
 
     def _session_started(self, session: SessionRecord) -> None:
         self.sessions_page.refresh(session.id)

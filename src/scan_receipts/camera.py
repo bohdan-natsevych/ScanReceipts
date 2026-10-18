@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -21,6 +22,14 @@ except (
 from .models import AppSettings, CameraCapability, CameraDescriptor, FramePacket
 
 log = logging.getLogger(__name__)
+
+# CLAUDE CODE: creating, configuring and releasing a VideoCapture is not safe
+# while another thread does the same - even on a different index. Media
+# Foundation then corrupts the heap (0xc0000374) or faults inside OpenCV, which
+# is how a preview closing on one thread and enumeration on the GUI thread took
+# the process down. Every device open, release and probe goes through this lock.
+# Reading frames does not: each source reads only from its own handle.
+DEVICE_LOCK = threading.Lock()
 
 
 class CameraError(RuntimeError):
@@ -154,6 +163,7 @@ class OpenCVSource(FrameSource):
         "contrast": "CAP_PROP_CONTRAST",
         "zoom": "CAP_PROP_ZOOM",
     }
+    SLOW_FRACTION = 0.6
 
     def __init__(
         self,
@@ -173,9 +183,17 @@ class OpenCVSource(FrameSource):
         )
         self._capture: Any | None = None
         self._opened_at = 0.0
+        self._meter = FrameRateMeter()
+        self._reported_fps = 0.0
+        self._delivered_format = "unknown"
 
     def open(self) -> None:
         require_opencv()
+        with DEVICE_LOCK:
+            self._open_device()
+        self._meter = FrameRateMeter()
+
+    def _open_device(self) -> None:
         backend = self.backend
         if backend is None:
             backend = cv2.CAP_MSMF if hasattr(cv2, "CAP_MSMF") else cv2.CAP_ANY
@@ -193,13 +211,15 @@ class OpenCVSource(FrameSource):
             raise CameraError(f"Could not open {self.descriptor.name}")
         self._capture = capture
         self._opened_at = time.monotonic()
+        self._reported_fps = float(capture.get(cv2.CAP_PROP_FPS))
+        self._delivered_format = _fourcc_name(capture.get(cv2.CAP_PROP_FOURCC))
         log.info(
             "%s delivers %sx%s @ %s fps as %s",
             self.descriptor.name,
             capture.get(cv2.CAP_PROP_FRAME_WIDTH),
             capture.get(cv2.CAP_PROP_FRAME_HEIGHT),
-            capture.get(cv2.CAP_PROP_FPS),
-            _fourcc_name(capture.get(cv2.CAP_PROP_FOURCC)),
+            self._reported_fps,
+            self._delivered_format,
         )
         self._apply_controls()
 
@@ -287,13 +307,42 @@ class OpenCVSource(FrameSource):
             raise CameraError("Source is not open")
         ok, frame = self._capture.read()
         if not ok:
+            self._meter.failed()
             return None
-        return FramePacket(timestamp=time.monotonic(), frame=frame)
+        now = time.monotonic()
+        if self._meter.frame(now):
+            self._log_frame_rate(f"in its first {self._meter.elapsed:.0f}s")
+        return FramePacket(timestamp=now, frame=frame)
+
+    def _log_frame_rate(self, span: str) -> None:
+        """Log the frame rate the camera really delivers.
+
+        CLAUDE CODE: the fps the driver reports is only what was negotiated. A
+        USB webcam sending uncompressed 1080p cannot fit it through USB 2.0 and
+        quietly delivers a fraction, so only frames counted over time show it.
+        """
+        rate = self._meter.rate()
+        if rate is None:
+            return
+        slow = self._reported_fps > 0 and rate < self.SLOW_FRACTION * self._reported_fps
+        log.log(
+            logging.WARNING if slow else logging.INFO,
+            "%s measured %.1f fps %s as %s (driver reports %.1f fps, %s failed reads)%s",
+            self.descriptor.name,
+            rate,
+            span,
+            self._delivered_format,
+            self._reported_fps,
+            self._meter.failed_reads,
+            " - far below what the driver reports" if slow else "",
+        )
 
     def close(self) -> None:
         if self._capture is not None:
+            self._log_frame_rate(f"over {self._meter.elapsed:.0f}s")
             log.info("Closing %s", self.descriptor.name)
-            self._capture.release()
+            with DEVICE_LOCK:
+                self._capture.release()
             self._capture = None
 
     @property
@@ -402,6 +451,44 @@ class VideoFileSource(FrameSource):
         ]
 
 
+class FrameRateMeter:
+    """Counts the frames a source actually delivers."""
+
+    def __init__(self, window_seconds: float = 5.0) -> None:
+        self.window_seconds = window_seconds
+        self.failed_reads = 0
+        self._frames = 0
+        self._first: float | None = None
+        self._last: float | None = None
+        self._window_reported = False
+
+    def frame(self, now: float) -> bool:
+        """Count one frame. True exactly once, when the first window is complete."""
+        if self._first is None:
+            self._first = now
+        self._frames += 1
+        self._last = now
+        if not self._window_reported and now - self._first >= self.window_seconds:
+            self._window_reported = True
+            return True
+        return False
+
+    def failed(self) -> None:
+        self.failed_reads += 1
+
+    @property
+    def elapsed(self) -> float:
+        if self._first is None or self._last is None:
+            return 0.0
+        return self._last - self._first
+
+    def rate(self) -> float | None:
+        """Frames per second between the first and last frame, or None if unknown."""
+        if self._frames < 2 or self.elapsed <= 0:
+            return None
+        return (self._frames - 1) / self.elapsed
+
+
 def _fourcc_name(value: float) -> str:
     """The four character code a device reports, as text."""
     code = int(value)
@@ -479,9 +566,10 @@ def enumerate_cameras(
     try:
         for index in range(maximum):
             for backend in dict.fromkeys(backends):
-                capture = cv2.VideoCapture(index, backend)
-                opened = capture.isOpened()
-                capture.release()
+                with DEVICE_LOCK:
+                    capture = cv2.VideoCapture(index, backend)
+                    opened = capture.isOpened()
+                    capture.release()
                 if opened:
                     found.append(
                         CameraDescriptor(

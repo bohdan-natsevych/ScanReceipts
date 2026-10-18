@@ -81,7 +81,16 @@ def frame_to_qimage(frame: np.ndarray) -> QImage:
 
 
 class SourcePreviewWorker(QObject):
-    """Open a selected source for preview only; never detects or records."""
+    """Open a selected source for preview only; never detects or records.
+
+    CLAUDE CODE: the worker runs on its own daemon thread rather than a QThread.
+    A QThread destroyed while it still runs aborts the process, and so does
+    its deleteLater chain when the owning window goes away first - both
+    happened at exit. A plain thread has no Qt object whose lifetime can go
+    wrong: the GUI joins it when it can and otherwise lets the process exit
+    past it. The worker itself lives on the GUI thread, so its signals reach
+    the UI queued.
+    """
 
     preview_ready = Signal(QImage)
     packet_ready = Signal(object)
@@ -98,8 +107,23 @@ class SourcePreviewWorker(QObject):
         # the thread was still starting - the preview then held the camera for
         # the rest of the session.
         self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self.run, name="source-preview", daemon=True
+        )
 
-    @Slot()
+    def start(self) -> None:
+        self._thread.start()
+
+    def is_alive(self) -> bool:
+        """True until run() has closed the source and returned."""
+        return self._thread.is_alive()
+
+    def join(self, timeout: float) -> bool:
+        """Wait for the source to be closed. True when it has been."""
+        if self._thread.ident is not None:
+            self._thread.join(timeout)
+        return not self._thread.is_alive()
+
     def run(self) -> None:
         failed_reads = 0
         try:
